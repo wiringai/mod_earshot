@@ -53,7 +53,7 @@ base64, and the session handshake.
 |---|---|---|
 | `native` | raw binary frames + small JSON control (`playAudio` / `clear`) | `clear` |
 | `twilio` | Twilio Media Streams (`connected`/`start`/`media`/`mark`), base64 µ-law | `clear` |
-| `openai` | OpenAI Realtime (`session.update`, `input_audio_buffer.append`, `response.audio.delta`) | `speech_started` |
+| `openai` | OpenAI Realtime (`session.update`, `input_audio_buffer.append`, `response.output_audio.delta`) | `speech_started` |
 | `deepgram` | Deepgram Voice Agent (`Settings`, raw binary audio) | `UserStartedSpeaking` |
 | `elevenlabs` | ElevenLabs Conversational AI (`user_audio_chunk` / `{type:audio}`, base64 µ-law), auto `ping`→`pong` | `interruption` |
 | `gemini` | Gemini Live (`setup`, `realtimeInput.mediaChunks` 16k / `serverContent` 24k PCM) | `serverContent.interrupted` |
