@@ -154,7 +154,7 @@ size_t es_encode(es_codec_t codec, const int16_t *in, size_t nsamples, uint8_t *
 
 size_t es_decode(es_codec_t codec, const uint8_t *in, size_t nbytes, int16_t *out)
 {
-    size_t i, n;
+    size_t i;
     switch (codec) {
     case ES_CODEC_L16:
         memcpy(out, in, nbytes);
@@ -166,7 +166,6 @@ size_t es_decode(es_codec_t codec, const uint8_t *in, size_t nbytes, int16_t *ou
         for (i = 0; i < nbytes; i++) out[i] = es_alaw_to_l16(in[i]);
         return nbytes;
     default:
-        n = 0; (void)n;
         return (size_t)-1;
     }
 }

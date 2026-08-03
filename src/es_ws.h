@@ -41,8 +41,9 @@ typedef struct {
     const char        *hdr_call_id;      /* -> X-Call-ID */
     const char        *hdr_channel_uuid; /* -> X-Channel-UUID */
     const char        *hdr_correlation;  /* -> X-Correlation-ID */
-    /* one protocol-specific header, e.g. name "OpenAI-Beta:" value "realtime=v1" */
-    const char        *hdr_extra_name;   /* includes the trailing ':' */
+    /* optional single protocol-specific handshake header (currently unused; extension point).
+     * When set, the name includes the trailing ':'. */
+    const char        *hdr_extra_name;
     const char        *hdr_extra_value;
     /* ws subprotocol to advertise on the wire (Sec-WebSocket-Protocol). NULL = none.
      * OpenAI Realtime answers with "realtime"; we must offer exactly that or lws

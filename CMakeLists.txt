@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(earshot LANGUAGES C CXX)
+project(earshot LANGUAGES C)
 
 # ---------------------------------------------------------------------------
 # Earshot / mod_earshot — FreeSWITCH audio-stream module.
@@ -13,7 +13,6 @@ project(earshot LANGUAGES C CXX)
 # ---------------------------------------------------------------------------
 
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(EARSHOT_TESTS "Build the unit tests" ON)
@@ -36,9 +35,7 @@ endif()
 find_package(PkgConfig)
 if(PkgConfig_FOUND)
   pkg_check_modules(FS freeswitch)
-  pkg_check_modules(LWS  libwebsockets)   # WebSocket transport (Tier 0)
-  pkg_check_modules(OPUS opus)            # opus codec (Tier 2)
-  pkg_check_modules(SOXR soxr)            # resampler (Tier 1)
+  pkg_check_modules(LWS  libwebsockets)   # WebSocket transport
 endif()
 
 if(NOT FS_FOUND AND EXISTS "/usr/include/freeswitch/switch.h")
@@ -60,8 +57,8 @@ if(FS_FOUND)
     message(WARNING "libwebsockets not found — install libwebsockets-dev to build es_ws.c")
   endif()
   set_target_properties(mod_earshot PROPERTIES PREFIX "" OUTPUT_NAME "mod_earshot")
-  target_include_directories(mod_earshot PRIVATE ${FS_INCLUDE_DIRS} ${LWS_INCLUDE_DIRS} ${OPUS_INCLUDE_DIRS} ${SOXR_INCLUDE_DIRS})
-  target_link_libraries(mod_earshot PRIVATE ${FS_LIBRARIES} ${LWS_LIBRARIES} ${OPUS_LIBRARIES} ${SOXR_LIBRARIES})
+  target_include_directories(mod_earshot PRIVATE ${FS_INCLUDE_DIRS} ${LWS_INCLUDE_DIRS})
+  target_link_libraries(mod_earshot PRIVATE ${FS_LIBRARIES} ${LWS_LIBRARIES})
   install(TARGETS mod_earshot LIBRARY DESTINATION "${FS_MOD_DIR}")
   message(STATUS "Earshot: building mod_earshot (FreeSWITCH found)")
 
@@ -73,7 +70,7 @@ if(FS_FOUND)
   set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/wiringai/mod_earshot")
   set(CPACK_GENERATOR "DEB")
   set(CPACK_DEBIAN_PACKAGE_SECTION "comm")
-  set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)   # auto-detect libwebsockets/opus/soxr runtime deps
+  set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)   # auto-detect libwebsockets runtime deps
   set(CPACK_DEBIAN_FILE_NAME "DEB-DEFAULT")
   include(CPack)
 else()

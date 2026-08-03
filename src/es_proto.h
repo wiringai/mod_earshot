@@ -4,14 +4,18 @@
  * Translates between Earshot's internal model (L16 frames + simple control) and
  * a specific agent wire protocol:
  *
- *   native   — raw binary audio frames (codec-coded) + small JSON control
- *   twilio   — Twilio Media Streams: connected/start/media/mark/stop JSON,
- *              base64 mu-law payloads, `clear` for barge-in. An agent written
- *              for Twilio works against Earshot unmodified.
- *   openai   — OpenAI Realtime: session.update handshake, input_audio_buffer.append
- *              (base64) out, response.audio.delta (base64) in, speech_started = barge-in.
- *   deepgram — Deepgram Voice Agent: Settings handshake, raw binary audio both ways,
- *              UserStartedSpeaking = barge-in.
+ *   native    — raw binary audio frames (codec-coded) + small JSON control
+ *   twilio    — Twilio Media Streams: connected/start/media/mark/stop JSON, base64 mu-law,
+ *               `clear` = barge-in
+ *   openai    — OpenAI Realtime: session.update handshake, input_audio_buffer.append (base64) out,
+ *               response.output_audio.delta (base64) in, speech_started = barge-in
+ *   deepgram  — Deepgram Voice Agent: Settings handshake, raw binary audio both ways,
+ *               UserStartedSpeaking = barge-in
+ *   elevenlabs— Conversational AI: user_audio_chunk out / audio events in, ping->pong keepalive
+ *   gemini    — Gemini Live: setup handshake, realtimeInput out / serverContent in, 16k-in/24k-out
+ *   pipecat   — Pipecat protobuf Frame{ audio: AudioRawFrame } both ways, InterruptionFrame = barge-in
+ *
+ * An agent written for any of these works against Earshot unmodified.
  *
  * For openai/deepgram the session handshake (voice, model, provider keys, prompt)
  * is agent-specific: the adapter sends a minimal audio-format default, or, if the

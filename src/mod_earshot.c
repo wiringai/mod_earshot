@@ -3,11 +3,11 @@
  *
  * Copyright (c) 2026 Varun Pratap Singh. MIT License (see ../LICENSE, ../NOTICE).
  *
- * STATUS: working + validated on a test environment against real SIP calls (sipp), both
- * protocols (native + twilio). Full duplex, ready-gate, reconnect-with-jitter,
- * bounded outbound queue, and Twilio Media Streams (incl. mark echo) are wired
- * and proven. Remaining work (resampler, openai/deepgram adapters, metrics) is
- * tracked in ../ROADMAP.md; per-piece layout is in ../docs/ARCHITECTURE.md.
+ * Full-duplex bridge: caller audio -> agent over a WebSocket, and the agent's audio
+ * -> caller via WRITE_REPLACE. Seven protocol adapters (native/twilio/openai/deepgram/
+ * elevenlabs/gemini/pipecat), module-side VAD + turn events, an agent control channel,
+ * PCI masking, multi-stream fan-out, latency metrics, G.711/L16 + resampling, and a
+ * uuid_audio_stream compat shim. Layout: ../docs/ARCHITECTURE.md; roadmap: ../ROADMAP.md.
  *
  * RENAME: the module identity is the token "earshot" / "mod_earshot". To rebrand,
  * change: this filename, the SWITCH_MODULE_* names below, the SWITCH_ADD_API/APP
@@ -40,13 +40,13 @@
 #define EARSHOT_SYNTAX \
     "<uuid> start <url> [id=<name>] [codec=l16|pcmu|pcma] [rate=8000|16000|24000] [dir=in|out|both]\n" \
     "\t  fan-out: many streams per channel via id=; dir=in is a read-only fork (transcription/monitor)\n" \
-    "\t\t[track=mono|mixed|stereo] [proto=native|twilio|openai|deepgram|elevenlabs|gemini|pipecat]\n" \
-    "\t\t[ready=firstframe|connect|manual] [buffer_ms=20] [jitter=drop|block]\n" \
+    "\t\t[proto=native|twilio|openai|deepgram|elevenlabs|gemini|pipecat]\n" \
+    "\t\t[ready=firstframe|connect|manual]\n" \
     "\t\t[vad=on [vad_barge=on] [vad_notify=on] [vad_mode=-1..3] [vad_voice_ms=200] [vad_silence_ms=500]]\n" \
-    "\t\t[dtmf=on] [mask=on] [commands=true] [metrics=<seconds>] [corr=auto|<id>] [auth=<token>] [meta=<json>]\n" \
+    "\t\t[dtmf=on] [mask=on] [commands=true] [metrics=<seconds>] [corr=auto|<id>] [auth=<token> | EARSHOT_AUTH var]\n" \
     "\t  control channel (commands=true): agent sends {\"type\":\"command\",\"action\":...}\n" \
     "\t  actions: transfer|hangup|send_dtmf|play|stop_play|record|setvar|hold|bridge|park\n" \
-    "<uuid> stop [meta]\n" \
+    "<uuid> stop\n" \
     "<uuid> pause | resume | flush\n" \
     "<uuid> send <text|json>\n" \
     "<uuid> mask on|off       (PCI: mute caller audio + suppress DTMF to the agent)\n" \
@@ -74,8 +74,6 @@ typedef struct {
     int              rate;          /* negotiated wire rate */
     es_dir_t         dir;
     es_proto_kind_t  proto;
-    int              buffer_ms;
-    switch_bool_t    jitter_drop;   /* TRUE = drop-oldest, FALSE = block */
     char             corr[256];    /* correlation id (auto -> Call-ID + UUID) */
     char             uuid[64];     /* channel uuid (for control-channel events) */
     char             id[64];       /* stream id for fan-out (empty = the default stream) */
@@ -258,10 +256,6 @@ static switch_bool_t es_apply_option(es_stream_t *st, const char *kv)
         st->allow_commands = (switch_bool_t) switch_true(val);  /* control channel opt-in */
     } else if (!strcasecmp(key, "metrics")) {
         st->metrics_interval = atoi(val);       /* seconds between earshot::metrics events */
-    } else if (!strcasecmp(key, "buffer_ms")) {
-        st->buffer_ms = atoi(val);
-    } else if (!strcasecmp(key, "jitter")) {
-        st->jitter_drop = (switch_bool_t)!strcasecmp(val, "drop");
     } else if (!strcasecmp(key, "id")) {
         if (strcasecmp(val, "default")) switch_copy_string(st->id, val, sizeof st->id);  /* fan-out stream id */
     } else if (!strcasecmp(key, "corr")) {
@@ -325,6 +319,9 @@ static void es_sink_mark(void *user, const char *name)
     if (st->marks && name) switch_queue_trypush(st->marks, strdup(name));
 }
 
+/* agent-signalled DTMF (e.g. Deepgram): the caller's own DTMF is audited via earshot::dtmf on
+ * the read path; DTMF the agent wants to *send* is a telephony action — use the control channel's
+ * send_dtmf action rather than this inbound sink, which is intentionally a no-op. */
 static void es_sink_dtmf(void *user, const char *digit) { (void) user; (void) digit; }
 
 /* control channel: run the whitelisted uuid_* API on the caller's channel. Runs on the ws
@@ -553,7 +550,7 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
     st = switch_core_alloc(pool, sizeof(*st));   /* pool alloc zeroes */
     switch_copy_string(st->url, argv[2], sizeof(st->url));
     st->codec = ES_CODEC_PCMU; st->rate = 8000; st->dir = ES_DIR_BOTH;   /* g711 8k telephony default */
-    st->proto = ES_PROTO_NATIVE; st->buffer_ms = 20; st->jitter_drop = SWITCH_TRUE;
+    st->proto = ES_PROTO_NATIVE;
     st->ready = SWITCH_FALSE;
     st->vad_mode = 2; st->vad_voice_ms = 200; st->vad_silence_ms = 500;   /* telephony defaults */
     st->start_time = st->last_metrics = switch_micro_time_now();
@@ -642,7 +639,7 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
         o.hdr_call_id      = st->corr;
         o.hdr_channel_uuid = switch_core_session_get_uuid(session);
         o.hdr_correlation  = st->corr;
-        o.hdr_extra_name   = es_proto_extra_header_name(st->proto);   /* e.g. OpenAI-Beta */
+        o.hdr_extra_name   = es_proto_extra_header_name(st->proto);   /* optional per-proto header (currently none) */
         o.hdr_extra_value  = es_proto_extra_header_value(st->proto);
         o.subprotocol      = es_proto_subprotocol(st->proto);         /* e.g. openai -> "realtime" */
         o.insecure         = switch_true(switch_channel_get_variable(channel, "EARSHOT_TLS_NO_HOSTNAME_CHECK"));
@@ -682,7 +679,7 @@ static switch_status_t es_simple(switch_core_session_t *session, const char *ver
 
     if (!strcasecmp(verb, "stop")) {
         switch_core_media_bug_remove(session, &st->bug);   /* triggers CLOSE -> teardown (clears private) */
-    } else if (!strcasecmp(verb, "pause"))  { /* TODO: stop enqueuing RX */ }
+    } else if (!strcasecmp(verb, "pause"))  { st->ready = SWITCH_FALSE; /* hold playback via the ready-gate */ }
     else if (!strcasecmp(verb, "resume")) { st->ready = SWITCH_TRUE; /* open ready-gate */ }
     else if (!strcasecmp(verb, "flush"))  {   /* barge-in: drop any queued agent audio now */
         if (st->play_buf) { switch_mutex_lock(st->play_mutex); switch_buffer_zero(st->play_buf); switch_mutex_unlock(st->play_mutex); }
@@ -785,8 +782,7 @@ static switch_status_t es_compat(switch_core_session_t *session, int argc, char 
     if (!strcasecmp(verb, "start")) {
         char *nargv[ES_MAX_ARGV] = { 0 };
         const char *url  = argc > 2 ? argv[2] : "";
-        const char *mix  = argc > 3 ? argv[3] : "mono";
-        const char *rate = argc > 4 ? argv[4] : "8k";
+        const char *rate = argc > 4 ? argv[4] : "8k";   /* mod_audio_stream <mix> (argv[3]) has no earshot equivalent */
         int hz = atoi(rate);
         int n = 0;
         if (strchr(rate, 'k') || strchr(rate, 'K')) hz *= 1000;
@@ -797,8 +793,6 @@ static switch_status_t es_compat(switch_core_session_t *session, int argc, char 
         nargv[n++] = (char *) "proto=native";
         nargv[n++] = (char *) "codec=l16";
         nargv[n++] = switch_core_session_sprintf(session, "rate=%d", hz);
-        nargv[n++] = switch_core_session_sprintf(session, "track=%s", mix);
-        if (argc > 5) nargv[n++] = switch_core_session_sprintf(session, "meta=%s", argv[5]);
         return es_start(session, n, nargv, stream);
     }
     if (!strcasecmp(verb, "send_text"))
