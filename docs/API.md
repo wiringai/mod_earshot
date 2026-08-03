@@ -1,0 +1,119 @@
+# Earshot API
+
+`mod_earshot` registers a dialplan **app** and an **API** named `earshot` (plus a
+`uuid_audio_stream`/`audio_stream` compat shim), a set of `earshot::` custom events, and a
+few `EARSHOT_*` channel variables. Options are **named** (`key=value`) — no positional order
+to memorize, and new options never shift an existing one.
+
+- **App** (dialplan, current channel): `<action application="earshot" data="<verb> …"/>`
+- **API** (fs_cli / ESL, explicit uuid **first**): `earshot <uuid> <verb> …`
+
+## Verbs
+
+### `start <url> [key=value …]`
+Begin streaming the channel's audio to `url` (`ws://` or `wss://`).
+
+| Option | Values | Default | Notes |
+|---|---|---|---|
+| `id` | `<name>` | *(default stream)* | fan-out: name this stream so many can run on one channel |
+| `proto` | `native` `twilio` `openai` `deepgram` `elevenlabs` `gemini` `pipecat` | `native` | wire adapter (see [Protocol adapters](#protocol-adapters)) |
+| `codec` | `pcmu` `pcma` `l16` | `pcmu` | g711 = 8-bit telephony (½ the bytes); some protos pin the codec |
+| `rate` | `8000` `16000` `24000` | `8000` | wire rate; resampled to/from the channel rate |
+| `dir` | `in` `out` `both` | `both` | `in` = caller→agent only (read-only **fork**, no playback); `both` = bidirectional agent |
+| `ready` | `firstframe` `connect` `manual` | `firstframe` | when playback opens (see [Ready gate](#ready-gate)) |
+| `vad` | `on` | off | module-side VAD → `speech_started`/`speech_stopped` |
+| `vad_barge` | `on` | off | flush playback the instant the caller speaks (barge-in) |
+| `vad_notify` | `on` | off | also send `{"type":"speech_started"}` to the agent |
+| `vad_mode` / `vad_voice_ms` / `vad_silence_ms` | ints | `2` / `200` / `500` | VAD aggressiveness + endpointing budget |
+| `dtmf` | `on` | off | capture caller DTMF → `earshot::dtmf` + forward to the agent |
+| `mask` | `on` | off | start in a PCI masking window (mute audio + redact DTMF to the agent) |
+| `commands` | `true` | false | **opt-in** control channel (agent can drive the call) |
+| `metrics` | `<seconds>` | `0` | emit `earshot::metrics` every N seconds |
+| `jitter` | `drop` `block` | `drop` | outbound backpressure policy |
+| `corr` | `auto` \| `<id>` | `auto` | correlation id; `auto` = SIP Call-ID |
+| `auth` | `Bearer <t>` \| `Token <t>` \| … | — | sent verbatim as `Authorization` on the handshake |
+
+### `stop` · `pause` · `resume`
+Tear down / suspend / resume the stream. Channel hangup also tears down cleanly.
+
+### `flush` — barge-in
+Immediately drop queued agent audio (also driven by protocol clear signals and `vad_barge`).
+
+### `send <text|json>`
+Write a raw message to the agent socket.
+
+### `mask on|off`
+Toggle the PCI masking window (operator control; the agent can also toggle it via the control channel).
+
+### `status` · `metrics`
+Return per-stream JSON. `metrics` also fires an `earshot::metrics` event. Fields include
+`proto`, `corr`, `id`, `tx/rx_frames`, `tx/rx_bytes`, `play_drops`, `commands`, `speech_starts`,
+`talking`, `dtmf`, `masking`, `ws_connected`, `ws_reconnects`, `ws_queue_drops`, and the latency
+KPIs `first_audio_ms`, `response_ms` / `response_ms_max`, `turns`, `ws_rtt_ms`.
+
+**Targeting a fan-out stream:** every non-`start` verb accepts an `id=<name>` immediately after the
+verb, e.g. `earshot <uuid> status id=transcribe`, `earshot <uuid> stop id=supervisor`.
+
+## Control channel (`commands=true`)
+
+The agent sends `{"type":"command","action":…}` over the same socket; Earshot maps each whitelisted
+action to a thread-safe `uuid_*` API, audits it via `earshot::command`, and replies `command_result`.
+
+```jsonc
+{"type":"command","action":"transfer","to":"2000","id":"c1"}   // -> uuid_transfer
+{"type":"command","action":"send_dtmf","digits":"1"}
+{"type":"command","action":"mask","state":"on"}                // PCI masking
+```
+Actions: `transfer · hangup · send_dtmf · play · stop_play · record · setvar · hold · bridge · park · mask`.
+Off by default; unknown/disabled → `{"ok":false,"error":…}`.
+
+## Events (subclass `earshot::…`)
+
+| Event | Key headers | Fires when |
+|---|---|---|
+| `earshot::connected` | `url` | WS handshake completes |
+| `earshot::ready` | `corr` | playback gate opens (also sets `earshot_ready=true`) |
+| `earshot::speech_started` / `earshot::speech_stopped` | `corr` | VAD turn boundaries (sets `earshot_talking`) |
+| `earshot::dtmf` | `digit` or `masked` | caller DTMF (`masked=true`, digit redacted, during a mask window) |
+| `earshot::command` | `action`, `api`, `ok`, `result` | a control-channel command ran |
+| `earshot::metrics` | counters + latency KPIs (`first-audio-ms`, `ws-rtt-ms`, …) | periodic / on-close / on-demand |
+
+All subclasses are reserved, so ESL subscribers receive them: `event plain CUSTOM earshot::metrics`.
+
+## Ready gate
+
+Playback into the channel is held until media is confirmed flowing, so an agent's first words never
+land in silence. `ready=firstframe` (default) opens on the agent's first audio frame; `ready=connect`
+on the WS handshake; `ready=manual` waits for `earshot <uuid> resume`. Opening fires `earshot::ready`
+and sets the `earshot_ready` channel variable.
+
+## Protocol adapters
+
+`proto=` selects how audio + control map onto the wire, so an existing agent works unchanged.
+Full framing details in [FEATURES.md](../FEATURES.md#2-protocol-adapters--); in brief:
+
+- **`native`** — raw binary frames + `{"type":"playAudio"|"clear"}` JSON control.
+- **`twilio`** — Twilio Media Streams (`connected`/`start`/`media`/`mark`, base64 µ-law, mark echo).
+- **`openai`** — OpenAI Realtime (`session.update`, `input_audio_buffer.append`, `response.audio.delta`; `OpenAI-Beta` header).
+- **`deepgram`** — Deepgram Voice Agent (`Settings`, raw binary audio, `UserStartedSpeaking`).
+- **`elevenlabs`** — ElevenLabs Conversational AI (`user_audio_chunk` / `{type:audio}`, auto `ping`→`pong`).
+- **`gemini`** — Gemini Live (`setup`, `realtimeInput.mediaChunks` 16k / `serverContent` 24k; resampled).
+- **`pipecat`** — Pipecat protobuf `Frame{ audio: AudioRawFrame }` (binary L16).
+
+For `openai`/`deepgram`/`gemini`/`elevenlabs`, provide the full session config (voice/model/keys) via
+the `EARSHOT_SESSION_CONFIG` channel variable; otherwise Earshot sends an audio-format default.
+
+## Channel variables
+
+| Variable | Purpose |
+|---|---|
+| `EARSHOT_SESSION_CONFIG` | verbatim first message for openai/deepgram/gemini/elevenlabs |
+| `EARSHOT_NO_RECONNECT` | disable auto-reconnect (default: reconnect with jittered backoff) |
+| `EARSHOT_TLS_NO_HOSTNAME_CHECK` | skip wss cert/hostname checks (dev only) |
+| `earshot_ready` / `earshot_talking` / `earshot_masking` | **set by** Earshot for dialplan logic |
+
+## Compatibility
+
+`uuid_audio_stream` / `audio_stream` accept mod_audio_stream's positional syntax
+(`start <url> <mix> <rate>`) and run existing dialplans unchanged — registered only when those names
+are free (won't collide with a loaded `mod_audio_stream`). See [FEATURES.md](../FEATURES.md).

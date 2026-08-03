@@ -1,0 +1,27 @@
+Earshot (mod_earshot)
+Copyright (c) 2026 Varun Pratap Singh
+Licensed under the MIT License (see LICENSE).
+
+------------------------------------------------------------------------------
+Provenance & attribution
+------------------------------------------------------------------------------
+
+Earshot is an independent, from-scratch implementation. Its purpose and problem
+space were inspired by prior FreeSWITCH audio-streaming modules, and we credit
+them gratefully:
+
+  * amigniter/mod_audio_stream  — https://github.com/amigniter/mod_audio_stream
+    MIT License. The original community module for streaming FreeSWITCH channel
+    audio to a WebSocket with bidirectional playback. Earshot reimagines the API
+    and adds codecs, protocol adapters, correlation, barge-in, and metrics; it
+    does not copy that project's source.
+
+  * drachtio/freeswitch-modules (mod_audio_fork / mod_audio_stream), Dave Horton
+    MIT License. Referenced for design comparison.
+
+If any third-party source is later vendored into this repository, its original
+copyright and license header will be retained here and in the file, as required
+by that license. As of this writing, none has been.
+
+FreeSWITCH is a trademark of FreeSWITCH Solutions / SignalWire; this project is
+an independent module and is not affiliated with or endorsed by them.

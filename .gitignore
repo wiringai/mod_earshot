@@ -1,0 +1,21 @@
+# build
+/build/
+/cmake-build-*/
+*.o
+*.lo
+*.so
+*.deb
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# local
+compile_commands.json
+
+# python
+__pycache__/
+*.pyc
