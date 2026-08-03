@@ -5,9 +5,6 @@
 > module-side turn detection, agent-driven call control, PCI masking, multi-stream fan-out,
 > and built-in latency metrics.
 
-**Status:** pre-release, MIT. Every capability below is validated end-to-end on real SIP calls
-(`sipp` + real audio) on a test environment. Not yet wired into production.
-
 Earshot is an independent, from-scratch implementation, **inspired by** the excellent
 [`amigniter/mod_audio_stream`](https://github.com/amigniter/mod_audio_stream) (MIT) — credit in
 [NOTICE](NOTICE) — but rethought for teams running AI voice at scale.
