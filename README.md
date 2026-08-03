@@ -5,10 +5,6 @@
 > module-side turn detection, agent-driven call control, PCI masking, multi-stream fan-out,
 > and built-in latency metrics.
 
-Earshot is an independent, from-scratch implementation, **inspired by** the excellent
-[`amigniter/mod_audio_stream`](https://github.com/amigniter/mod_audio_stream) (MIT) — credit in
-[NOTICE](NOTICE) — but rethought for teams running AI voice at scale.
-
 ---
 
 ## Why Earshot
