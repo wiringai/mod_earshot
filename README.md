@@ -33,17 +33,18 @@ on it. The full pitch is in **[WHY.md](WHY.md)**; the complete capability list i
 ## Works with your agent
 
 Point `proto=` at your stack — same module, one word different. All adapters are
-mock-tested in CI; ✅ marks those also validated against the **live** vendor on a real SIP call.
+mock-tested in CI; ✅ marks those also validated end-to-end on a real SIP call (against the live
+service, or — for the self-hosted Pipecat wire format — its official protobuf schema).
 
 | Agent / protocol             | `proto=`     | Status               |
 |------------------------------|--------------|----------------------|
 | OpenAI Realtime              | `openai`     | ✅ live-validated    |
 | Deepgram Voice Agent         | `deepgram`   | ✅ live-validated    |
 | Native (any WebSocket)       | `native`     | ✅ live-validated    |
+| Pipecat                      | `pipecat`    | ✅ validated (protobuf) |
 | ElevenLabs Conversational AI | `elevenlabs` | adapter ✓            |
 | Google Gemini Live           | `gemini`     | adapter ✓            |
 | Twilio Media Streams         | `twilio`     | adapter ✓            |
-| Pipecat                      | `pipecat`    | adapter ✓ (protobuf) |
 
 <sub>Product names and logos are trademarks of their respective owners. mod_earshot is an
 independent project and is not affiliated with, sponsored by, or endorsed by any of them.</sub>
