@@ -4,7 +4,7 @@ Earshot is the reliable, protocol-flexible FreeSWITCH ↔ AI-agent audio bridge.
 version of what makes it different from the alternatives — the pitch for the open-source launch.
 (For the full capability list see [FEATURES.md](FEATURES.md); for what's next, [ROADMAP.md](ROADMAP.md).)
 
-Everything below is implemented and **validated on real SIP calls** on a test environment, unless
+Everything below is implemented and **validated on real SIP calls** (`sipp` + real audio), unless
 marked otherwise.
 
 ---

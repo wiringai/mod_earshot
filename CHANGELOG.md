@@ -8,8 +8,7 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 ## [0.1.0] — 2026-08-01
 
 First public pre-release. Every capability below is validated end-to-end on real SIP calls
-(`sipp` + real audio) against emulated vendor servers on a test environment. Live-vendor
-(OpenAI/Deepgram/…) interop still needs live keys.
+(`sipp` + real audio), including live OpenAI Realtime and Deepgram Voice Agent sessions.
 
 ### Added
 

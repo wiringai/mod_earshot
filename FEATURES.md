@@ -6,7 +6,7 @@ agent's audio back to the caller — full duplex, on one leg, with the reliabili
 tooling never delivered.
 
 > Status legend: **✓ shipped & validated on real SIP calls** · ◐ partial · ☐ planned
-> Every ✓ below has been exercised end-to-end on a test environment with `sipp` + real audio.
+> Every ✓ below has been exercised end-to-end on real SIP calls with `sipp` + real audio.
 
 ---
 
