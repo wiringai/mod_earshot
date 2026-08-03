@@ -52,8 +52,8 @@ A sketch of the internals, so contributors (and future-you) know where things li
   including adversarial input). No FreeSWITCH dependency.
 - **Resampler** — FreeSWITCH's bundled speex resampler (`switch_resample`), created per direction only
   when the channel and wire rates differ (e.g. Gemini 8k↔16k send / 24k↔8k receive).
-- **`es_ws` (transport)** — libwebsockets client: ws/wss, handshake headers (auth, correlation,
-  `OpenAI-Beta`), a mutex-guarded outbound queue with a drop-oldest cap, reconnect-with-jitter, and a
+- **`es_ws` (transport)** — libwebsockets client: ws/wss, handshake headers (auth, correlation) and the
+  vendor ws subprotocol (OpenAI `realtime`), a mutex-guarded outbound queue with a drop-oldest cap, reconnect-with-jitter, and a
   WS ping/pong RTT probe.
 - **VAD** — `switch_vad` on the caller's read stream → `earshot::speech_started/stopped`, the ready-gate,
   and speech-triggered barge-in; also the clock for per-turn response latency.

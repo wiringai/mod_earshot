@@ -60,7 +60,7 @@ base64, and the session handshake.
 | `pipecat` | Pipecat protobuf `Frame{ audio: AudioRawFrame }` (binary, L16) | `InterruptionFrame` |
 
 - Twilio **mark echo-on-drain** round-trips (agents that wait on marks work).
-- OpenAI gets the required `OpenAI-Beta: realtime=v1` handshake header automatically.
+- OpenAI negotiates the `realtime` WebSocket subprotocol automatically (auth via `EARSHOT_AUTH`).
 - ElevenLabs' `ping` keepalive is answered with `pong` automatically (no dropped sessions).
 - Gemini's asymmetric rates (16 kHz in / 24 kHz out) are resampled transparently to the channel.
 - Pipecat frames are hand-encoded protobuf — the codec is a pure-C unit (`es_pb`) with its own tests.

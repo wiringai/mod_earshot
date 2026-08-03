@@ -21,7 +21,7 @@ workarounds. Earshot's `WRITE_REPLACE` path is validated with real audio, full d
 1. **Seven wire protocols, your agent unmodified.** `native`, `twilio` (Media Streams), `openai`
    (Realtime), `deepgram` (Voice Agent), `elevenlabs`, `gemini` (Live), `pipecat` (protobuf). Swap
    vendors by changing one word (`proto=`). Correlation, base64/JSON/protobuf framing, handshakes
-   (OpenAI-Beta header, ElevenLabs ping→pong, Gemini setup), and per-vendor barge-in signals are
+   (OpenAI `realtime` subprotocol, ElevenLabs ping→pong, Gemini setup), and per-vendor barge-in signals are
    handled for you.
 
 2. **Turn-taking that works with *any* agent.** Module-side VAD (`switch_vad`) emits

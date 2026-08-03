@@ -51,6 +51,26 @@ independent project and is not affiliated with, sponsored by, or endorsed by any
 
 ---
 
+## Observability & AI latency — built for scale
+
+`mod_audio_stream` hands you an audio pipe. In production the first question is **"is the agent fast
+enough — on every call, right now?"** Earshot answers it with no agent instrumentation: every stream
+emits an `earshot::metrics` event (periodic, on-close, or on-demand JSON) carrying the numbers voice
+teams actually optimize:
+
+- **Time-to-first-audio** — call start → the agent's first word. The single "does it feel alive?" number.
+- **Per-turn response latency** (avg + max) — caller stops → agent starts; catch a slow model or vendor the moment it drifts.
+- **WebSocket RTT** — transport health, sampled via ping/pong.
+- **Throughput & backpressure** — tx/rx frames + bytes, play-buffer depth, queue drops, reconnects.
+
+At one call it's a debugger; at ten thousand it's your **fleet latency scoreboard** — ship the events
+to Prometheus/OTel and alert on p95 time-to-first-audio *per vendor*. Every metric is keyed to the
+**two-key trace** (SIP Call-ID + channel UUID), so a single call stitches together across FreeSWITCH,
+your agent, and your logs. Lifecycle, DTMF, barge-in/turn, and agent-command events flow over the same
+FreeSWITCH event socket — the whole call is observable, the agent untouched.
+
+---
+
 ## 60-second quickstart
 
 **1. Build & install** (needs FreeSWITCH dev headers + `libwebsockets-dev`):

@@ -94,7 +94,7 @@ Full framing details in [FEATURES.md](../FEATURES.md#2-protocol-adapters--); in 
 
 - **`native`** — raw binary frames + `{"type":"playAudio"|"clear"}` JSON control.
 - **`twilio`** — Twilio Media Streams (`connected`/`start`/`media`/`mark`, base64 µ-law, mark echo).
-- **`openai`** — OpenAI Realtime (`session.update`, `input_audio_buffer.append`, `response.audio.delta`; `OpenAI-Beta` header).
+- **`openai`** — OpenAI Realtime (`session.update`, `input_audio_buffer.append`, `response.output_audio.delta`; `realtime` subprotocol, auth via `EARSHOT_AUTH`).
 - **`deepgram`** — Deepgram Voice Agent (`Settings`, raw binary audio, `UserStartedSpeaking`).
 - **`elevenlabs`** — ElevenLabs Conversational AI (`user_audio_chunk` / `{type:audio}`, auto `ping`→`pong`).
 - **`gemini`** — Gemini Live (`setup`, `realtimeInput.mediaChunks` 16k / `serverContent` 24k; resampled).

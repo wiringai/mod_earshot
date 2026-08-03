@@ -40,7 +40,7 @@ asyncio.run(main())
 ## 2. OpenAI Realtime
 
 Your OpenAI Realtime agent works unmodified — Earshot speaks its wire protocol (`session.update`,
-`input_audio_buffer.append`, `response.audio.delta`) and adds the required `OpenAI-Beta` header.
+`input_audio_buffer.append`, `response.output_audio.delta`) and negotiates the `realtime` subprotocol.
 
 ```xml
 <action application="set" data="EARSHOT_SESSION_CONFIG={"type":"session.update","session":{"instructions":"You are a helpful receptionist.","input_audio_format":"g711_ulaw","output_audio_format":"g711_ulaw","turn_detection":{"type":"server_vad"}}}"/>

@@ -60,7 +60,7 @@ Legend: ☐ todo · ◐ in progress · ☑ done
     duplex (recorded READ=16896 / WRITE≈7932 each). Real-vendor interop still needs live keys.
     - `twilio`: `connected`+`start` framing, base64 μ-law media both ways, **mark echo-on-drain**.
     - `openai`: `session.update` handshake (g711_ulaw + server_vad), append out / delta in,
-      `OpenAI-Beta: realtime=v1` header, `speech_started` = barge-in.
+      `realtime` subprotocol, `speech_started` = barge-in.
     - `deepgram`: `Settings` handshake (mulaw/linear16 @ 8k), raw **binary** audio, `UserStartedSpeaking`.
     - `elevenlabs`: `user_audio_chunk` out / `{type:audio}` in (base64 ulaw_8000), **auto `ping`→`pong`
       keepalive** (validated), `interruption` = barge-in.
