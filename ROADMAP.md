@@ -112,6 +112,12 @@ Legend: ☐ todo · ◐ in progress · ☑ done
   only the agent owns `WRITE_REPLACE` so forks never fight over playback. Every verb targets a stream by
   `id=`. **VALIDATED**: 3 streams on one channel all received caller audio; agent played back, forks
   didn't; per-stream stop worked. (☐ next: `track=both` caller+agent mix for the supervisor; mask-all-streams.)
+- ☐ **Shared lws service thread / event loop (the #1 concurrency ceiling).** Today each stream owns
+  its own `pthread` + `lws_context`, so N sessions ≈ 2·N threads. A load test saturated a
+  2-vCPU VM's CPU around ~150–200 concurrent sessions (~2 threads and ~17 MB per session), degrading
+  gracefully with no crash. libwebsockets can service thousands of connections from one context/thread;
+  moving to a shared service loop (a small pool sized to cores, many `wsi` each) would remove the
+  thread-per-stream overhead and let concurrency scale with RAM rather than thread count.
 - ☐ Per-stream jitter buffer tuning; adaptive frame sizing
 - ☐ Optional simultaneous recording fork
 - ☑ **`uuid_audio_stream` / `audio_stream` compat shim** — mod_audio_stream's positional syntax
