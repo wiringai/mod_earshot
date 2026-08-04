@@ -28,6 +28,8 @@
 /* Upper bound on a single reassembled inbound message (runaway/hostile guard). */
 #define ES_WS_MAX_MSG (4u * 1024u * 1024u)
 #define ES_POOL_MAX   16     /* hard cap on service contexts */
+#define ES_STABLE_MS  5000   /* a connection must stay up this long before backoff resets,
+                              * so a flapping (accept-then-close) endpoint keeps backing off */
 
 static long es_now_ms(void)
 {
@@ -63,6 +65,7 @@ struct es_ws {
     volatile int            suppress_events; /* mute owner callbacks once teardown starts */
     int                     backoff_ms;
     long                    next_reconnect_ms;
+    long                    connected_since_ms;   /* when the current link established (0 if down) */
     unsigned                rng;
     unsigned                reconnects;
     uint64_t                queue_drops;
@@ -194,7 +197,7 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
     case LWS_CALLBACK_CLIENT_ESTABLISHED:
         if (!w) break;
         w->connected = 1;
-        w->backoff_ms = 250;
+        w->connected_since_ms = es_now_ms();   /* backoff resets only once this proves stable */
         w->last_ping_ms = 0;
         /* Gate on suppress_events like every other callback: a wsi that establishes
          * after teardown began (the orphan window) must not call into freed owner state. */
@@ -367,6 +370,11 @@ static void *es_pool_service(void *arg)
                 es_connect(w);
                 pthread_mutex_lock(&p->mu);
             } else if (w->connected && w->wsi) {
+                /* Only a link that has stayed up past ES_STABLE_MS counts as healthy and
+                 * earns a backoff reset; a flapping endpoint never gets here long enough,
+                 * so its reconnects keep backing off instead of hammering at the 250ms floor. */
+                if (w->backoff_ms != 250 && now - w->connected_since_ms >= ES_STABLE_MS)
+                    w->backoff_ms = 250;
                 if (w->head) lws_callback_on_writable(w->wsi);
                 if (w->last_ping_ms == 0) w->last_ping_ms = now;
                 if (now - w->last_ping_ms >= 5000) {
