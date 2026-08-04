@@ -355,8 +355,15 @@ static void es_connect(es_ws_t *w)
 static void *es_pool_service(void *arg)
 {
     es_pool_ctx_t *p = (es_pool_ctx_t *) arg;
+    int gated = 0;
     while (p->running) {
-        lws_service(p->ctx, 50);          /* woken early by lws_cancel_service */
+        /* When the previous iteration skipped the walk, an intent (a queued frame's
+         * transition wake, a stop, a start) may already be pending with its wake
+         * consumed — nothing else would wake an idle context for up to 50ms. Shorten
+         * the service timeout for exactly that window so the deferred walk runs
+         * within ~10ms instead. (Peer review: recurring ~50ms audio stall when a
+         * pong-phased wake landed in the gated window.) */
+        lws_service(p->ctx, gated ? 10 : 50);   /* woken early by lws_cancel_service */
         long now = es_now_ms();
         es_ws_t *prev = NULL, *w;
         /* Rate-limit the housekeeping walk. Under load lws_service returns per socket
@@ -364,7 +371,8 @@ static void *es_pool_service(void *arg)
          * with traffic x streams (quadratic-ish). Everything the walk does — connect,
          * teardown, ping/liveness/backoff timers, the have_queued backstop — is fine at
          * 10ms resolution, so cap it there; socket I/O itself is not delayed. */
-        if (now - p->last_walk_ms < 10) continue;
+        if (now - p->last_walk_ms < 10) { gated = 1; continue; }
+        gated = 0;
         p->last_walk_ms = now;
         pthread_mutex_lock(&p->mu);
         w = p->list;
@@ -456,6 +464,7 @@ static int es_pool_init(void)   /* lazy, once */
         info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
         pthread_mutex_init(&p->mu, NULL);
         p->list = NULL;
+        p->last_walk_ms = 0;   /* first walk always runs (reload hygiene) */
         p->ctx = lws_create_context(&info);
         if (!p->ctx) goto fail;
         p->running = 1;
