@@ -96,6 +96,7 @@ typedef struct es_pool_ctx {
     _Atomic int         running;   /* service loop reads it unlocked; shutdown writes it */
     pthread_mutex_t     mu;      /* guards `list` + each stream's lifecycle flags */
     es_ws_t            *list;    /* attached streams (via w->lnext) */
+    long                last_walk_ms;  /* service thread only: housekeeping rate limit */
 } es_pool_ctx_t;
 
 static struct {
@@ -111,6 +112,7 @@ static char *es_strdup(const char *s) { return s ? strdup(s) : NULL; }
 /* ---- outbound queue ---------------------------------------------------- */
 static int es_enqueue(es_ws_t *w, const void *data, size_t len, int binary)
 {
+    int was_queued;
     es_ws_msg_t *m = malloc(sizeof(*m) + LWS_PRE + len);
     if (!m) return -1;
     m->next = NULL; m->len = len; m->binary = binary;
@@ -127,11 +129,16 @@ static int es_enqueue(es_ws_t *w, const void *data, size_t len, int binary)
         w->queue_drops++;
         free(old);
     }
+    was_queued = w->have_queued;
     w->have_queued = 1;   /* atomic pending-flag; the service thread reads this, not w->head */
     pthread_mutex_unlock(&w->mu);
 
-    /* wake the shared loop; it requests writable for us on the service thread */
-    if (w->pool && w->pool->ctx) lws_cancel_service(w->pool->ctx);
+    /* Wake the shared loop only on the empty->non-empty transition. While the queue
+     * stays non-empty the WRITEABLE chain (and the <=50ms service tick as backstop)
+     * keeps draining it, so waking on every frame — 50/s per audio stream — only
+     * burns CPU re-walking the pool's stream list. The transition wake plus the
+     * have_queued re-check in es_cb/es_pool_service means no wakeup is ever lost. */
+    if (!was_queued && w->pool && w->pool->ctx) lws_cancel_service(w->pool->ctx);
     return 0;
 }
 
@@ -352,6 +359,13 @@ static void *es_pool_service(void *arg)
         lws_service(p->ctx, 50);          /* woken early by lws_cancel_service */
         long now = es_now_ms();
         es_ws_t *prev = NULL, *w;
+        /* Rate-limit the housekeeping walk. Under load lws_service returns per socket
+         * event, and walking every stream on every return makes housekeeping cost scale
+         * with traffic x streams (quadratic-ish). Everything the walk does — connect,
+         * teardown, ping/liveness/backoff timers, the have_queued backstop — is fine at
+         * 10ms resolution, so cap it there; socket I/O itself is not delayed. */
+        if (now - p->last_walk_ms < 10) continue;
+        p->last_walk_ms = now;
         pthread_mutex_lock(&p->mu);
         w = p->list;
         while (w) {
