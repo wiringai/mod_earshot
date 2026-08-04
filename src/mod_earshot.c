@@ -22,8 +22,6 @@
 #define EARSHOT_EVENT_CONNECTED    "earshot::connected"
 #define EARSHOT_EVENT_DISCONNECTED "earshot::disconnected"
 #define EARSHOT_EVENT_ERROR        "earshot::error"
-#define EARSHOT_EVENT_MESSAGE      "earshot::message"
-#define EARSHOT_EVENT_PLAYBACK     "earshot::playback"
 #define EARSHOT_EVENT_METRICS      "earshot::metrics"
 #define EARSHOT_EVENT_READY        "earshot::ready"
 #define EARSHOT_EVENT_COMMAND      "earshot::command"
@@ -69,6 +67,7 @@ typedef enum {
 } es_ready_mode_t;
 
 typedef struct {
+    switch_core_session_t *session;    /* owning session (WS thread is joined before it is torn down) */
     char             url[1024];
     es_codec_t       codec;
     int              rate;          /* negotiated wire rate */
@@ -382,7 +381,6 @@ static void es_sink_command(void *user, const char *action, const char *api, con
 static void es_on_ws_event(void *user, int connected, int code, const char *reason)
 {
     es_stream_t *st = (es_stream_t *) user;
-    (void) code;
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
                       "earshot ws %s: %s\n", connected ? "connected" : "closed", reason ? reason : "");
     if (connected) {
@@ -391,6 +389,11 @@ static void es_on_ws_event(void *user, int connected, int code, const char *reas
          * reconnected agent is left unconfigured. */
         es_proto_send_start(st->proto_ctx, st->ws);
         if (st->ready_mode == ES_READY_CONNECT) st->ready = SWITCH_TRUE;
+    } else if (st->session) {
+        /* code < 0 = connect/handshake failure, otherwise a normal close (incl. reconnect churn).
+         * Safe to fire from the ws thread: it is joined before the session is torn down. */
+        es_fire_event(st->session, code < 0 ? EARSHOT_EVENT_ERROR : EARSHOT_EVENT_DISCONNECTED,
+                      "reason", reason ? reason : "");
     }
 }
 
@@ -548,6 +551,7 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
     if (argc < 3) { stream->write_function(stream, "-ERR usage: %s\n", EARSHOT_SYNTAX); return SWITCH_STATUS_FALSE; }
 
     st = switch_core_alloc(pool, sizeof(*st));   /* pool alloc zeroes */
+    st->session = session;
     switch_copy_string(st->url, argv[2], sizeof(st->url));
     st->codec = ES_CODEC_PCMU; st->rate = 8000; st->dir = ES_DIR_BOTH;   /* g711 8k telephony default */
     st->proto = ES_PROTO_NATIVE;
@@ -910,8 +914,6 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_earshot_load)
     switch_event_reserve_subclass(EARSHOT_EVENT_CONNECTED);
     switch_event_reserve_subclass(EARSHOT_EVENT_DISCONNECTED);
     switch_event_reserve_subclass(EARSHOT_EVENT_ERROR);
-    switch_event_reserve_subclass(EARSHOT_EVENT_MESSAGE);
-    switch_event_reserve_subclass(EARSHOT_EVENT_PLAYBACK);
     switch_event_reserve_subclass(EARSHOT_EVENT_METRICS);
     switch_event_reserve_subclass(EARSHOT_EVENT_READY);
     switch_event_reserve_subclass(EARSHOT_EVENT_COMMAND);
@@ -956,8 +958,6 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_earshot_shutdown)
     switch_event_free_subclass(EARSHOT_EVENT_CONNECTED);
     switch_event_free_subclass(EARSHOT_EVENT_DISCONNECTED);
     switch_event_free_subclass(EARSHOT_EVENT_ERROR);
-    switch_event_free_subclass(EARSHOT_EVENT_MESSAGE);
-    switch_event_free_subclass(EARSHOT_EVENT_PLAYBACK);
     switch_event_free_subclass(EARSHOT_EVENT_METRICS);
     switch_event_free_subclass(EARSHOT_EVENT_READY);
     switch_event_free_subclass(EARSHOT_EVENT_COMMAND);

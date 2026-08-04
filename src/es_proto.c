@@ -578,6 +578,15 @@ static void es_pipecat_on_binary(es_proto_ctx_t *p, const uint8_t *data, size_t 
     if (f.has_audio && f.audio_len) {
         int16_t pcm[SWITCH_RECOMMENDED_BUFFER_SIZE];
         size_t alen = f.audio_len, ns;
+        /* Honor the frame's declared rate: if the agent streams at a rate other than the
+         * one we assumed, rebuild the inbound resampler for it (only on change; rs_in is
+         * touched solely on this receive thread, so this is safe). */
+        if (f.sample_rate && (uint32_t) p->rate_out != f.sample_rate) {
+            p->rate_out = (int) f.sample_rate;
+            if (p->rs_in) switch_resample_destroy(&p->rs_in);
+            if (p->rate_out != p->chan_rate)
+                switch_resample_create(&p->rs_in, p->rate_out, p->chan_rate, 8192, SWITCH_RESAMPLE_QUALITY, 1);
+        }
         if (alen > sizeof(pcm)) alen = sizeof(pcm);           /* L16: bytes -> alen/2 samples <= buf */
         ns = es_decode(ES_CODEC_L16, f.audio, alen, pcm);
         if (ns != (size_t) -1 && ns) es_emit_audio(p, pcm, ns, sink);
