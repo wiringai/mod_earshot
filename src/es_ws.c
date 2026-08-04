@@ -310,6 +310,25 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
         if (w && w->wsi == wsi) { w->connected = 0; w->wsi = NULL; }
         break;
 
+    case LWS_CALLBACK_EVENT_WAIT_CANCELLED: {
+        /* Delivered ON the service thread, inside lws_service, immediately after any
+         * lws_cancel_service wake (w/user are NULL — this is a context broadcast).
+         * Arm writables for streams with pending output RIGHT NOW instead of waiting
+         * for the rate-limited housekeeping walk: audio cadence stays per-frame exact
+         * (peer-review measured 25-60ms gaps and a ~1s stall when arming was left to
+         * the 10ms-quantized walk). Housekeeping itself stays gated. */
+        struct lws_context *cx = wsi ? lws_get_context(wsi) : NULL;
+        es_pool_ctx_t *pp = cx ? (es_pool_ctx_t *) lws_context_user(cx) : NULL;
+        es_ws_t *s;
+        if (!pp) break;
+        pthread_mutex_lock(&pp->mu);
+        for (s = pp->list; s; s = s->lnext)
+            if (s->have_queued && s->connected && s->wsi && !s->kill)
+                lws_callback_on_writable(s->wsi);
+        pthread_mutex_unlock(&pp->mu);
+        break;
+    }
+
     default:
         break;
     }
@@ -462,6 +481,7 @@ static int es_pool_init(void)   /* lazy, once */
         info.port = CONTEXT_PORT_NO_LISTEN;
         info.protocols = es_protocols;
         info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+        info.user = p;   /* EVENT_WAIT_CANCELLED broadcast -> find our pool ctx */
         pthread_mutex_init(&p->mu, NULL);
         p->list = NULL;
         p->last_walk_ms = 0;   /* first walk always runs (reload hygiene) */
@@ -487,6 +507,8 @@ fail:
     pthread_mutex_unlock(&g_pool.mu);
     return -1;
 }
+
+int es_ws_global_init(void) { return es_pool_init(); }
 
 void es_ws_global_shutdown(void)
 {

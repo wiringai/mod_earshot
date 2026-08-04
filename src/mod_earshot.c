@@ -911,6 +911,15 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_earshot_load)
 
     *module_interface = switch_loadable_module_create_module_interface(pool, modname);
 
+    /* Build the shared WS service-thread pool NOW, not lazily on the first call:
+     * lazy init ran inside that call's session thread and cost it ~1s of caller
+     * audio while the pool contexts were created (measured: first call after load
+     * had first_audio_ms ~1s late and ~50 tx frames short). */
+    if (es_ws_global_init() != 0) {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mod_earshot: ws pool init failed\n");
+        return SWITCH_STATUS_FALSE;
+    }
+
     /* reserve the custom event subclasses so subclass-filtered subscribers receive them */
     switch_event_reserve_subclass(EARSHOT_EVENT_CONNECTED);
     switch_event_reserve_subclass(EARSHOT_EVENT_DISCONNECTED);

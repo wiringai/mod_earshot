@@ -81,4 +81,9 @@ void     es_ws_destroy(es_ws_t *ws);
  * must be joined before the module's code is unmapped. */
 void     es_ws_global_shutdown(void);
 
+/* Create the shared service-thread pool up front (idempotent). Call at module load:
+ * lazy creation inside the first call's session thread delays that call's media
+ * start by the pool build time (~1s of lost caller audio on a small box). */
+int      es_ws_global_init(void);
+
 #endif /* ES_WS_H */
