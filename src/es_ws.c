@@ -52,17 +52,18 @@ struct es_ws {
     struct es_ws           *lnext;   /* pool stream-list linkage (pool->mu) */
     struct lws             *wsi;     /* current connection (service thread) */
     pthread_mutex_t         mu;      /* guards the queue + the metrics fields */
-    es_ws_msg_t            *head, *tail;   /* FIFO outbound queue */
+    es_ws_msg_t            *head, *tail;   /* FIFO outbound queue (both under w->mu) */
+    _Atomic int             have_queued;   /* queue non-empty; read lock-free by the service thread */
     size_t                  queued_bytes;
     size_t                  max_queue_bytes;
-    volatile int            connected;
-    volatile int            alive;        /* stream wants to stay up (0 once stopping) */
-    volatile int            want_connect; /* service thread should (re)connect now */
-    volatile int            teardown;     /* stop requested by the owning thread */
-    volatile int            done;         /* service thread released the wsi + unlinked us */
-    volatile int            orphaned;     /* owner gave up waiting; service thread must free */
+    _Atomic int             connected;    /* set by es_cb (service thread), read by owners  */
+    volatile int            alive;        /* stream wants to stay up (0 once stopping) [p->mu] */
+    volatile int            want_connect; /* service thread should (re)connect now  [p->mu] */
+    volatile int            teardown;     /* stop requested by the owning thread     [p->mu] */
+    _Atomic int             done;         /* service released the wsi + unlinked us (spun on) */
+    volatile int            orphaned;     /* owner gave up waiting; service frees    [p->mu] */
     int                     kill;         /* force-close the wsi (service thread only) */
-    volatile int            suppress_events; /* mute owner callbacks once teardown starts */
+    _Atomic int             suppress_events; /* mute owner callbacks once teardown starts */
     int                     backoff_ms;
     long                    next_reconnect_ms;
     long                    connected_since_ms;   /* when the current link established (0 if down) */
@@ -88,7 +89,7 @@ struct es_ws {
 typedef struct es_pool_ctx {
     struct lws_context *ctx;
     pthread_t           thread;
-    volatile int        running;
+    _Atomic int         running;   /* service loop reads it unlocked; shutdown writes it */
     pthread_mutex_t     mu;      /* guards `list` + each stream's lifecycle flags */
     es_ws_t            *list;    /* attached streams (via w->lnext) */
 } es_pool_ctx_t;
@@ -122,6 +123,7 @@ static int es_enqueue(es_ws_t *w, const void *data, size_t len, int binary)
         w->queue_drops++;
         free(old);
     }
+    w->have_queued = 1;   /* atomic pending-flag; the service thread reads this, not w->head */
     pthread_mutex_unlock(&w->mu);
 
     /* wake the shared loop; it requests writable for us on the service thread */
@@ -134,7 +136,7 @@ static es_ws_msg_t *es_dequeue(es_ws_t *w)
     es_ws_msg_t *m;
     pthread_mutex_lock(&w->mu);
     m = w->head;
-    if (m) { w->head = m->next; if (!w->head) w->tail = NULL; w->queued_bytes -= m->len; }
+    if (m) { w->head = m->next; if (!w->head) { w->tail = NULL; w->have_queued = 0; } w->queued_bytes -= m->len; }
     pthread_mutex_unlock(&w->mu);
     return m;
 }
@@ -202,7 +204,7 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
         /* Gate on suppress_events like every other callback: a wsi that establishes
          * after teardown began (the orphan window) must not call into freed owner state. */
         if (!w->suppress_events && w->o.on_event) w->o.on_event(w->o.user, 1, 0, "established");
-        if (w->head) lws_callback_on_writable(wsi);
+        if (w->have_queued) lws_callback_on_writable(wsi);
         break;
 
     case LWS_CALLBACK_CLIENT_RECEIVE: {
@@ -257,7 +259,7 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
             int n = lws_write(wsi, m->buf + LWS_PRE, m->len, wp);
             free(m);
             if (n < 0) return -1;
-            if (w->head) lws_callback_on_writable(wsi);
+            if (w->have_queued) lws_callback_on_writable(wsi);
         }
         break;
     }
@@ -375,7 +377,7 @@ static void *es_pool_service(void *arg)
                  * so its reconnects keep backing off instead of hammering at the 250ms floor. */
                 if (w->backoff_ms != 250 && now - w->connected_since_ms >= ES_STABLE_MS)
                     w->backoff_ms = 250;
-                if (w->head) lws_callback_on_writable(w->wsi);
+                if (w->have_queued) lws_callback_on_writable(w->wsi);
                 if (w->last_ping_ms == 0) w->last_ping_ms = now;
                 if (now - w->last_ping_ms >= 5000) {
                     w->last_ping_ms = now; w->want_ping = 1;
@@ -402,7 +404,10 @@ static int es_pool_init(void)   /* lazy, once */
 {
     long cores;
     int i, k;
-    if (g_pool.inited) return 0;
+    /* No unlocked fast-path read of g_pool.inited: that would race the locked write
+     * below and, worse, let a caller observe inited=1 without the release barrier that
+     * publishes g_pool.n / g_pool.c[].ctx — i.e. use a half-built pool. Always take the
+     * lock; es_pool_init runs once per stream start, so it is not hot. */
     pthread_mutex_lock(&g_pool.mu);
     if (g_pool.inited) { pthread_mutex_unlock(&g_pool.mu); return 0; }
 
