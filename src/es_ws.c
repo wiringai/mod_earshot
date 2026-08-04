@@ -30,6 +30,9 @@
 #define ES_POOL_MAX   16     /* hard cap on service contexts */
 #define ES_STABLE_MS  5000   /* a connection must stay up this long before backoff resets,
                               * so a flapping (accept-then-close) endpoint keeps backing off */
+#define ES_PING_MS    5000   /* send a WebSocket ping this often while connected */
+#define ES_LIVENESS_MS 20000 /* no inbound frame or pong for this long => peer is dead
+                              * (hung agent / half-open TCP): drop the wsi and reconnect */
 
 static long es_now_ms(void)
 {
@@ -73,6 +76,7 @@ struct es_ws {
     long                    rtt_ms;
     long                    ping_sent_ms;
     long                    last_ping_ms;
+    long                    last_rx_ms;    /* last inbound frame/pong; drives liveness timeout */
     int                     want_ping;
     /* inbound reassembly (service thread only) */
     unsigned char          *rx;
@@ -200,6 +204,7 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
         if (!w) break;
         w->connected = 1;
         w->connected_since_ms = es_now_ms();   /* backoff resets only once this proves stable */
+        w->last_rx_ms = w->connected_since_ms; /* liveness clock starts now */
         w->last_ping_ms = 0;
         /* Gate on suppress_events like every other callback: a wsi that establishes
          * after teardown began (the orphan window) must not call into freed owner state. */
@@ -211,6 +216,7 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
         int final;
         if (!w) break;
         if (w->kill) return -1;                        /* teardown: refuse further rx, close */
+        w->last_rx_ms = es_now_ms();                   /* inbound data = peer is alive */
         final = lws_is_final_fragment(wsi) && !lws_remaining_packet_payload(wsi);
         if (!w->rx_drop) {
             size_t need = w->rx_len + len + 1;
@@ -265,9 +271,11 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
     }
 
     case LWS_CALLBACK_CLIENT_RECEIVE_PONG:
-        if (w && w->ping_sent_ms) {
+        if (!w) break;
+        w->last_rx_ms = es_now_ms();                   /* pong = peer is alive */
+        if (w->ping_sent_ms) {
             pthread_mutex_lock(&w->mu);
-            w->rtt_ms = es_now_ms() - w->ping_sent_ms;
+            w->rtt_ms = w->last_rx_ms - w->ping_sent_ms;
             pthread_mutex_unlock(&w->mu);
         }
         break;
@@ -379,12 +387,22 @@ static void *es_pool_service(void *arg)
                     w->backoff_ms = 250;
                 if (w->have_queued) lws_callback_on_writable(w->wsi);
                 if (w->last_ping_ms == 0) w->last_ping_ms = now;
-                if (now - w->last_ping_ms >= 5000) {
+                if (now - w->last_ping_ms >= ES_PING_MS) {
                     w->last_ping_ms = now; w->want_ping = 1;
+                    lws_callback_on_writable(w->wsi);
+                }
+                /* Liveness: a live peer answers pings with pongs (and usually sends audio),
+                 * so last_rx_ms stays fresh. If nothing has arrived for ES_LIVENESS_MS the
+                 * peer is hung or the TCP is half-open — force the wsi closed so the reconnect
+                 * path below recovers it. kill closes via WRITEABLE returning -1; it is cleared
+                 * before the next connect so the fresh wsi is not killed too. */
+                else if (!w->kill && now - w->last_rx_ms >= ES_LIVENESS_MS) {
+                    w->kill = 1;
                     lws_callback_on_writable(w->wsi);
                 }
             } else if (!w->connected && !w->wsi && w->o.reconnect && now >= w->next_reconnect_ms) {
                 int jitter = (int) (w->rng = w->rng * 1103515245u + 12345u) % (w->backoff_ms / 2 + 1);
+                w->kill = 0;   /* a liveness drop set this; clear it so the new wsi survives */
                 w->next_reconnect_ms = now + w->backoff_ms + jitter;   /* non-blocking backoff */
                 if (w->backoff_ms < 8000) w->backoff_ms *= 2;
                 pthread_mutex_lock(&w->mu); w->reconnects++; pthread_mutex_unlock(&w->mu);
