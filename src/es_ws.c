@@ -53,6 +53,8 @@ struct es_ws {
     es_ws_opts_t            o;       /* owned copy (strings duped) */
     struct es_pool_ctx     *pool;    /* service context we run on (shared) */
     struct es_ws           *lnext;   /* pool stream-list linkage (pool->mu) */
+    struct es_ws           *arm_next;/* pending-arm list linkage          (pool->mu) */
+    int                     in_arm;  /* on the pending-arm list           (pool->mu) */
     struct lws             *wsi;     /* current connection (service thread) */
     pthread_mutex_t         mu;      /* guards the queue + the metrics fields */
     es_ws_msg_t            *head, *tail;   /* FIFO outbound queue (both under w->mu) */
@@ -96,6 +98,7 @@ typedef struct es_pool_ctx {
     _Atomic int         running;   /* service loop reads it unlocked; shutdown writes it */
     pthread_mutex_t     mu;      /* guards `list` + each stream's lifecycle flags */
     es_ws_t            *list;    /* attached streams (via w->lnext) */
+    es_ws_t            *arm_list;/* streams awaiting a writable arm (via w->arm_next) */
     long                last_walk_ms;  /* service thread only: housekeeping rate limit */
 } es_pool_ctx_t;
 
@@ -133,12 +136,20 @@ static int es_enqueue(es_ws_t *w, const void *data, size_t len, int binary)
     w->have_queued = 1;   /* atomic pending-flag; the service thread reads this, not w->head */
     pthread_mutex_unlock(&w->mu);
 
-    /* Wake the shared loop only on the empty->non-empty transition. While the queue
-     * stays non-empty the WRITEABLE chain (and the <=50ms service tick as backstop)
-     * keeps draining it, so waking on every frame — 50/s per audio stream — only
-     * burns CPU re-walking the pool's stream list. The transition wake plus the
-     * have_queued re-check in es_cb/es_pool_service means no wakeup is ever lost. */
-    if (!was_queued && w->pool && w->pool->ctx) lws_cancel_service(w->pool->ctx);
+    /* Wake the shared loop only on the empty->non-empty transition, and register on
+     * the pool's pending-arm list so the EVENT_WAIT_CANCELLED handler arms exactly
+     * this stream — O(pending), not O(all streams) — the moment the service thread
+     * wakes. While the queue stays non-empty the WRITEABLE chain keeps draining with
+     * no wakes at all; the rate-limited walk's have_queued check remains the backstop,
+     * so no wakeup is ever lost. (Never holds w->mu and p->mu together: w->mu was
+     * released above, and the service thread's order is p->mu -> w->mu.) */
+    if (!was_queued && w->pool && w->pool->ctx) {
+        es_pool_ctx_t *p = w->pool;
+        pthread_mutex_lock(&p->mu);
+        if (!w->in_arm && !w->teardown) { w->in_arm = 1; w->arm_next = p->arm_list; p->arm_list = w; }
+        pthread_mutex_unlock(&p->mu);
+        lws_cancel_service(p->ctx);
+    }
     return 0;
 }
 
@@ -313,18 +324,23 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
     case LWS_CALLBACK_EVENT_WAIT_CANCELLED: {
         /* Delivered ON the service thread, inside lws_service, immediately after any
          * lws_cancel_service wake (w/user are NULL — this is a context broadcast).
-         * Arm writables for streams with pending output RIGHT NOW instead of waiting
-         * for the rate-limited housekeeping walk: audio cadence stays per-frame exact
-         * (peer-review measured 25-60ms gaps and a ~1s stall when arming was left to
-         * the 10ms-quantized walk). Housekeeping itself stays gated. */
+         * Arm writables for the streams that registered on the pending-arm list —
+         * O(streams needing arming), not O(all streams), so per-frame audio cadence
+         * stays exact (peer-review measured 25-60ms gaps and a ~1s stall when arming
+         * waited for the 10ms-quantized walk) without re-coupling wake cost to the
+         * stream count. Streams are freed only by the walk's finalize, which purges
+         * them from this list first, so entries can never dangle. */
         struct lws_context *cx = wsi ? lws_get_context(wsi) : NULL;
         es_pool_ctx_t *pp = cx ? (es_pool_ctx_t *) lws_context_user(cx) : NULL;
         es_ws_t *s;
         if (!pp) break;
         pthread_mutex_lock(&pp->mu);
-        for (s = pp->list; s; s = s->lnext)
+        while ((s = pp->arm_list)) {
+            pp->arm_list = s->arm_next;
+            s->in_arm = 0; s->arm_next = NULL;
             if (s->have_queued && s->connected && s->wsi && !s->kill)
                 lws_callback_on_writable(s->wsi);
+        }
         pthread_mutex_unlock(&pp->mu);
         break;
     }
@@ -406,6 +422,12 @@ static void *es_pool_service(void *arg)
                     }
                     /* wait for CLOSED to clear w->wsi, then finalize below */
                 } else {                      /* wsi released: finalize here, off lws_service */
+                    if (w->in_arm) {          /* purge from the pending-arm list before any free */
+                        es_ws_t **ap = &p->arm_list;
+                        while (*ap && *ap != w) ap = &(*ap)->arm_next;
+                        if (*ap) *ap = w->arm_next;
+                        w->in_arm = 0;
+                    }
                     if (prev) prev->lnext = next; else p->list = next;
                     w->done = 1;              /* es_ws_destroy may be waiting on this */
                     if (w->orphaned) es_free_full(w);  /* owner gave up; we own the free now */
@@ -484,6 +506,7 @@ static int es_pool_init(void)   /* lazy, once */
         info.user = p;   /* EVENT_WAIT_CANCELLED broadcast -> find our pool ctx */
         pthread_mutex_init(&p->mu, NULL);
         p->list = NULL;
+        p->arm_list = NULL;
         p->last_walk_ms = 0;   /* first walk always runs (reload hygiene) */
         p->ctx = lws_create_context(&info);
         if (!p->ctx) goto fail;
