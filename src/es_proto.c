@@ -90,10 +90,15 @@ const char *es_proto_subprotocol(es_proto_kind_t k)
     return (k == ES_PROTO_OPENAI) ? "realtime" : NULL;
 }
 
-/* codec -> the vendor's audio-format name for the session handshake */
-static const char *es_openai_fmt(es_codec_t c)
+/* codec -> the vendor's audio-format object for the session handshake.
+ * OpenAI Realtime GA nests formats as {"type":"audio/pcmu"|"audio/pcma"} or
+ * {"type":"audio/pcm","rate":N}; the pre-GA flat "g711_ulaw"/"pcm16" strings are
+ * rejected by the GA endpoint, which then assumes pcm@24k and hears our u-law
+ * bytes as noise — server VAD never finds an end of turn, so no response comes. */
+static void es_openai_fmt(es_codec_t c, int rate, char *out, size_t olen)
 {
-    return c == ES_CODEC_PCMA ? "g711_alaw" : c == ES_CODEC_L16 ? "pcm16" : "g711_ulaw";
+    if (c == ES_CODEC_L16) snprintf(out, olen, "{\"type\":\"audio/pcm\",\"rate\":%d}", rate);
+    else snprintf(out, olen, "{\"type\":\"audio/%s\"}", c == ES_CODEC_PCMA ? "pcma" : "pcmu");
 }
 static const char *es_deepgram_fmt(es_codec_t c)
 {
@@ -176,12 +181,16 @@ void es_proto_send_start(es_proto_ctx_t *p, es_ws_t *ws)
 
     /* openai/deepgram: a full user-supplied config wins; else send an audio-format default */
     if (p->kind == ES_PROTO_OPENAI) {
+        char fin[64], fout[64];
         if (p->cfg) { es_send_text_z(ws, p->cfg); return; }
+        es_openai_fmt(p->codec, p->rate, fin, sizeof fin);
+        es_openai_fmt(p->codec, p->rate_out, fout, sizeof fout);
         snprintf(msg, sizeof msg,
-            "{\"type\":\"session.update\",\"session\":{"
-            "\"input_audio_format\":\"%s\",\"output_audio_format\":\"%s\","
-            "\"turn_detection\":{\"type\":\"server_vad\"}}}",
-            es_openai_fmt(p->codec), es_openai_fmt(p->codec));
+            "{\"type\":\"session.update\",\"session\":{\"type\":\"realtime\","
+            "\"output_modalities\":[\"audio\"],"
+            "\"audio\":{\"input\":{\"format\":%s,\"turn_detection\":{\"type\":\"server_vad\"}},"
+            "\"output\":{\"format\":%s}}}}",
+            fin, fout);
         es_send_text_z(ws, msg);
         return;
     }
