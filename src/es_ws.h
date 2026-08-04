@@ -50,10 +50,11 @@ typedef struct {
      * rejects the mismatch. Most agents use no subprotocol. */
     const char        *subprotocol;
 
-    /* TLS (wss) */
-    const char        *ca_file;
-    const char        *cert_file;    /* client cert (mTLS), optional */
-    const char        *key_file;
+    /* TLS (wss). Server certs are verified against the system trust store; that covers
+     * the public CAs the AI vendors use. Per-stream custom CA / client-cert (mTLS) is not
+     * offered here: streams share pooled lws contexts, and lws binds client TLS material at
+     * context (not per-wsi) level — supporting it means partitioning streams onto their own
+     * context (a future item), not a dead per-stream field. */
     int                insecure;     /* skip cert/hostname checks (dev only) */
 } es_ws_opts_t;
 

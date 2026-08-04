@@ -59,8 +59,8 @@ struct es_ws {
     volatile int            teardown;     /* stop requested by the owning thread */
     volatile int            done;         /* service thread released the wsi + unlinked us */
     volatile int            orphaned;     /* owner gave up waiting; service thread must free */
-    int                     kill;         /* force-close the wsi (service thread) */
-    int                     suppress_events; /* don't fire on_event during teardown */
+    int                     kill;         /* force-close the wsi (service thread only) */
+    volatile int            suppress_events; /* mute owner callbacks once teardown starts */
     int                     backoff_ms;
     long                    next_reconnect_ms;
     unsigned                rng;
@@ -196,7 +196,9 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
         w->connected = 1;
         w->backoff_ms = 250;
         w->last_ping_ms = 0;
-        if (w->o.on_event) w->o.on_event(w->o.user, 1, 0, "established");
+        /* Gate on suppress_events like every other callback: a wsi that establishes
+         * after teardown began (the orphan window) must not call into freed owner state. */
+        if (!w->suppress_events && w->o.on_event) w->o.on_event(w->o.user, 1, 0, "established");
         if (w->head) lws_callback_on_writable(wsi);
         break;
 
@@ -280,6 +282,14 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
         }
         break;
 
+    case LWS_CALLBACK_WSI_DESTROY:
+        /* Backstop: killing a still-connecting wsi (LWS_TO_KILL_ASYNC) can deliver only
+         * WSI_DESTROY, not CLOSED/CONNECTION_ERROR. Null our wsi here too so es_pool_service
+         * can finalize teardown instead of stalling until es_ws_destroy times out. Match on
+         * the exact wsi so a newer reconnect's wsi is never cleared. */
+        if (w && w->wsi == wsi) { w->connected = 0; w->wsi = NULL; }
+        break;
+
     default:
         break;
     }
@@ -311,8 +321,14 @@ static void es_connect(es_ws_t *w)
         if (w->o.insecure)
             i.ssl_connection |= LCCSCF_ALLOW_SELFSIGNED | LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK;
     }
-    if (!lws_client_connect_via_info(&i) && w->o.on_event && !w->suppress_events)
-        w->o.on_event(w->o.user, 0, -1, "connect failed");
+    if (!lws_client_connect_via_info(&i)) {
+        /* Be authoritative: on some immediate-failure paths lws returns NULL without
+         * firing CONNECTION_ERROR and without nulling *pwsi. Clear it ourselves so the
+         * reconnect guard (!w->wsi) can fire — otherwise the stream never retries. */
+        w->wsi = NULL;
+        if (w->o.on_event && !w->suppress_events)
+            w->o.on_event(w->o.user, 0, -1, "connect failed");
+    }
 }
 
 /* ---- pool service thread ----------------------------------------------- */
@@ -343,7 +359,13 @@ static void *es_pool_service(void *arg)
                 }
             } else if (w->want_connect) {
                 w->want_connect = 0;
+                /* es_connect can synchronously re-enter es_cb -> on_event; never hold p->mu
+                 * across it (an owner callback that calls es_ws_* would deadlock the pool).
+                 * Safe to drop the lock mid-walk: only this thread frees/unlinks streams, so
+                 * w and next stay valid; a concurrent es_ws_start only prepends a new head. */
+                pthread_mutex_unlock(&p->mu);
                 es_connect(w);
+                pthread_mutex_lock(&p->mu);
             } else if (w->connected && w->wsi) {
                 if (w->head) lws_callback_on_writable(w->wsi);
                 if (w->last_ping_ms == 0) w->last_ping_ms = now;
@@ -356,7 +378,9 @@ static void *es_pool_service(void *arg)
                 w->next_reconnect_ms = now + w->backoff_ms + jitter;   /* non-blocking backoff */
                 if (w->backoff_ms < 8000) w->backoff_ms *= 2;
                 pthread_mutex_lock(&w->mu); w->reconnects++; pthread_mutex_unlock(&w->mu);
+                pthread_mutex_unlock(&p->mu);   /* same reason as want_connect: no callbacks under p->mu */
                 es_connect(w);
+                pthread_mutex_lock(&p->mu);
             }
             prev = w; w = next;
         }
@@ -416,8 +440,15 @@ void es_ws_global_shutdown(void)
     pthread_mutex_lock(&g_pool.mu);
     for (i = 0; i < g_pool.n; i++) {
         es_pool_ctx_t *p = &g_pool.c[i];
+        es_ws_t *w;
         if (p->running) { p->running = 0; if (p->ctx) lws_cancel_service(p->ctx); pthread_join(p->thread, NULL); }
+        /* The service thread is gone. Any stream still attached is a straggler (an orphan
+         * whose wsi never closed, or a caller that skipped teardown). Mute it, let
+         * lws_context_destroy close its wsi (callbacks run here, on this thread, with w still
+         * valid and events suppressed), then free — so nothing leaks and no wsi outlives w. */
+        for (w = p->list; w; w = w->lnext) { w->suppress_events = 1; w->teardown = 1; }
         if (p->ctx) { lws_context_destroy(p->ctx); p->ctx = NULL; }
+        while (p->list) { w = p->list; p->list = w->lnext; es_free_full(w); }
         pthread_mutex_destroy(&p->mu);
     }
     g_pool.n = 0; g_pool.inited = 0;
