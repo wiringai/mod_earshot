@@ -72,7 +72,12 @@ int      es_ws_send_text(es_ws_t *ws, const char *data, size_t len);
 int      es_ws_send_binary(es_ws_t *ws, const void *data, size_t len);
 int      es_ws_connected(es_ws_t *ws);
 void     es_ws_get_stats(es_ws_t *ws, es_ws_stats_t *out);
-void     es_ws_stop(es_ws_t *ws);                   /* disconnect + join */
+void     es_ws_stop(es_ws_t *ws);                   /* disconnect + detach from the pool */
 void     es_ws_destroy(es_ws_t *ws);
+
+/* Tear down the shared service-thread pool. Call once at module unload, AFTER every
+ * stream has been stopped — the pool's threads outlive individual streams, so they
+ * must be joined before the module's code is unmapped. */
+void     es_ws_global_shutdown(void);
 
 #endif /* ES_WS_H */

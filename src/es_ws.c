@@ -1,11 +1,17 @@
 /*
  * es_ws — libwebsockets client transport for Earshot.
  *
- * STATUS: reviewed draft. Builds/validates on a test environment with libwebsockets-dev.
- * The structure (context on a service thread, mutex-guarded outbound queue
- * flushed on WRITEABLE, callback delivery of inbound frames + lifecycle,
- * reconnect-with-backoff) is the standard lws client pattern; expect small
- * fixes against the installed lws version on first compile.
+ * Shared-event-loop model: instead of one pthread + one lws_context per stream
+ * (which capped concurrency at threads/RAM), all streams share a small POOL of
+ * service contexts (sized to CPU cores). Each stream is one wsi on a pool
+ * context; a single service thread per pool context drives many wsi.
+ *
+ * Threading rule (the whole design hinges on it): every lws call for a context —
+ * connect, writable, close — happens ONLY on that context's service thread. Other
+ * threads communicate exactly one way: mutate shared state under a lock, then
+ * lws_cancel_service() (the one lws call that is safe cross-thread) to wake the
+ * loop, which does the actual lws work. Connect and teardown are therefore async:
+ * the caller flags intent and the service thread carries it out.
  *
  * Copyright (c) 2026 Varun Pratap Singh. MIT License.
  */
@@ -19,10 +25,9 @@
 #include <unistd.h>
 #include <time.h>
 
-/* Upper bound on a single reassembled inbound message. Real agent frames
- * (session config, audio deltas) are well under this; the cap only stops a
- * runaway or hostile server from growing the rx buffer without limit. */
+/* Upper bound on a single reassembled inbound message (runaway/hostile guard). */
 #define ES_WS_MAX_MSG (4u * 1024u * 1024u)
+#define ES_POOL_MAX   16     /* hard cap on service contexts */
 
 static long es_now_ms(void)
 {
@@ -41,35 +46,57 @@ typedef struct es_ws_msg {
 
 struct es_ws {
     es_ws_opts_t            o;       /* owned copy (strings duped) */
-    struct lws_context     *ctx;
-    struct lws             *wsi;
-    pthread_t               thread;
-    pthread_mutex_t         mu;
+    struct es_pool_ctx     *pool;    /* service context we run on (shared) */
+    struct es_ws           *lnext;   /* pool stream-list linkage (pool->mu) */
+    struct lws             *wsi;     /* current connection (service thread) */
+    pthread_mutex_t         mu;      /* guards the queue + the metrics fields */
     es_ws_msg_t            *head, *tail;   /* FIFO outbound queue */
-    size_t                  queued_bytes;  /* current backlog size (guarded by mu) */
-    size_t                  max_queue_bytes; /* drop-oldest past this (0 = unlimited) */
-    volatile int            running;
+    size_t                  queued_bytes;
+    size_t                  max_queue_bytes;
     volatile int            connected;
-    int                     backoff_ms;    /* current reconnect backoff */
-    unsigned                rng;           /* backoff jitter state */
-    unsigned                reconnects;    /* reconnect attempts (metrics) */
-    uint64_t                queue_drops;   /* frames dropped at the queue cap (metrics) */
-    long                    rtt_ms;        /* last measured ws round-trip (metrics) */
-    long                    ping_sent_ms;  /* send time of the outstanding ping */
-    long                    last_ping_ms;  /* last ping schedule time */
-    int                     want_ping;     /* a ping is due on the next WRITEABLE */
-    /* inbound reassembly: lws can split one ws message across several RECEIVE
-     * callbacks (and never NUL-terminates); accumulate here, dispatch once whole. */
-    unsigned char          *rx;            /* reassembly buffer (service thread only) */
-    size_t                  rx_len;        /* bytes accumulated so far */
-    size_t                  rx_cap;        /* allocated capacity */
-    int                     rx_drop;       /* current message over cap / OOM: discard it whole */
+    volatile int            alive;        /* stream wants to stay up (0 once stopping) */
+    volatile int            want_connect; /* service thread should (re)connect now */
+    volatile int            teardown;     /* stop requested by the owning thread */
+    volatile int            done;         /* service thread released the wsi + unlinked us */
+    volatile int            orphaned;     /* owner gave up waiting; service thread must free */
+    int                     kill;         /* force-close the wsi (service thread) */
+    int                     suppress_events; /* don't fire on_event during teardown */
+    int                     backoff_ms;
+    long                    next_reconnect_ms;
+    unsigned                rng;
+    unsigned                reconnects;
+    uint64_t                queue_drops;
+    long                    rtt_ms;
+    long                    ping_sent_ms;
+    long                    last_ping_ms;
+    int                     want_ping;
+    /* inbound reassembly (service thread only) */
+    unsigned char          *rx;
+    size_t                  rx_len, rx_cap;
+    int                     rx_drop;
     /* parsed url */
     char                    host[256];
     char                    path[512];
     int                     port;
     int                     use_tls;
 };
+
+/* one shared service context: an lws_context + its service thread + the streams on it */
+typedef struct es_pool_ctx {
+    struct lws_context *ctx;
+    pthread_t           thread;
+    volatile int        running;
+    pthread_mutex_t     mu;      /* guards `list` + each stream's lifecycle flags */
+    es_ws_t            *list;    /* attached streams (via w->lnext) */
+} es_pool_ctx_t;
+
+static struct {
+    pthread_mutex_t mu;
+    int             inited;
+    int             n;
+    es_pool_ctx_t   c[ES_POOL_MAX];
+    unsigned        rr;
+} g_pool = { PTHREAD_MUTEX_INITIALIZER, 0, 0, {{0}}, 0 };
 
 static char *es_strdup(const char *s) { return s ? strdup(s) : NULL; }
 
@@ -85,9 +112,6 @@ static int es_enqueue(es_ws_t *w, const void *data, size_t len, int binary)
     if (w->tail) w->tail->next = m; else w->head = m;
     w->tail = m;
     w->queued_bytes += len;
-    /* Bound the backlog: past the cap, drop the OLDEST frames. This buffers audio
-     * across a brief reconnect but prevents unbounded growth (and stale playback)
-     * during a long outage. Never drop the frame we just enqueued. */
     while (w->max_queue_bytes && w->queued_bytes > w->max_queue_bytes && w->head != w->tail) {
         es_ws_msg_t *old = w->head;
         w->head = old->next;
@@ -97,12 +121,8 @@ static int es_enqueue(es_ws_t *w, const void *data, size_t len, int binary)
     }
     pthread_mutex_unlock(&w->mu);
 
-    /* Wake the service loop ONLY via lws_cancel_service — the one lws call that is
-     * safe from another thread. Requesting writable (lws_callback_on_writable) must
-     * happen on the service thread that owns the wsi; doing it here raced the wsi's
-     * create/destroy during a reconnect storm and corrupted the heap. The service
-     * loop requests writable itself once it sees queued data. */
-    lws_cancel_service(w->ctx);
+    /* wake the shared loop; it requests writable for us on the service thread */
+    if (w->pool && w->pool->ctx) lws_cancel_service(w->pool->ctx);
     return 0;
 }
 
@@ -122,17 +142,36 @@ static void es_drain(es_ws_t *w)
     while ((m = es_dequeue(w))) free(m);
 }
 
-/* ---- lws protocol callback -------------------------------------------- */
+/* Free everything owned by a stream. Called by exactly one thread per stream: the
+ * owner (es_ws_destroy) if it reclaimed the stream, otherwise the service thread
+ * once it finishes teardown. Never called while a wsi still references w. */
+static void es_free_full(es_ws_t *w)
+{
+    es_drain(w);
+    free(w->rx);
+    if (w->pool) pthread_mutex_destroy(&w->mu);   /* mu is only initialised once started */
+    free((void *) w->o.url);
+    free((void *) w->o.auth);
+    free((void *) w->o.hdr_call_id);
+    free((void *) w->o.hdr_channel_uuid);
+    free((void *) w->o.hdr_correlation);
+    free((void *) w->o.hdr_extra_name);
+    free((void *) w->o.hdr_extra_value);
+    free((void *) w->o.subprotocol);
+    free(w);
+}
+
+/* ---- lws protocol callback (per-wsi `user` = the owning es_ws) ---------- */
 static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
                  void *user, void *in, size_t len)
 {
-    es_ws_t *w = (es_ws_t *) lws_context_user(lws_get_context(wsi));
-    (void) user;
+    es_ws_t *w = (es_ws_t *) user;   /* set via i.userdata at connect time */
 
     switch (reason) {
     case LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER: {
         unsigned char **p = (unsigned char **) in, *end = (*p) + len;
-        int rc = 0;   /* lws_add_http_header_by_name returns non-zero if the header buffer is full */
+        int rc = 0;
+        if (!w) break;
         if (w->o.auth)
             rc |= lws_add_http_header_by_name(wsi, (const unsigned char *)"Authorization:",
                 (const unsigned char *)w->o.auth, (int)strlen(w->o.auth), p, end);
@@ -148,37 +187,34 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
         if (w->o.hdr_extra_name && w->o.hdr_extra_value)
             rc |= lws_add_http_header_by_name(wsi, (const unsigned char *)w->o.hdr_extra_name,
                 (const unsigned char *)w->o.hdr_extra_value, (int)strlen(w->o.hdr_extra_value), p, end);
-        if (rc) return -1;   /* couldn't fit the required headers -> abort rather than truncate */
+        if (rc) return -1;
         break;
     }
 
     case LWS_CALLBACK_CLIENT_ESTABLISHED:
+        if (!w) break;
         w->connected = 1;
-        w->backoff_ms = 250;                 /* reset backoff on success */
+        w->backoff_ms = 250;
+        w->last_ping_ms = 0;
         if (w->o.on_event) w->o.on_event(w->o.user, 1, 0, "established");
         if (w->head) lws_callback_on_writable(wsi);
         break;
 
     case LWS_CALLBACK_CLIENT_RECEIVE: {
-        /* Accumulate fragments: lws may split a single ws message across several
-         * RECEIVE callbacks, and the delivered buffer is NOT NUL-terminated.
-         * Dispatch only once the whole message has arrived; NUL-terminate text so
-         * cJSON_Parse never reads past the end (a live agent's multi-KB frames
-         * would otherwise over-read the rx buffer and corrupt the heap). */
-        int final = lws_is_final_fragment(wsi) && !lws_remaining_packet_payload(wsi);
-        /* Accumulate unless this message already blew the cap / OOM'd — in which case
-         * we must discard EVERY fragment of it (not just resync), or the tail would be
-         * dispatched as a bogus standalone message. */
+        int final;
+        if (!w) break;
+        if (w->kill) return -1;                        /* teardown: refuse further rx, close */
+        final = lws_is_final_fragment(wsi) && !lws_remaining_packet_payload(wsi);
         if (!w->rx_drop) {
-            size_t need = w->rx_len + len + 1;             /* +1 reserves the text NUL */
+            size_t need = w->rx_len + len + 1;
             if (need > ES_WS_MAX_MSG) {
-                w->rx_drop = 1;                            /* runaway/hostile server guard */
+                w->rx_drop = 1;
             } else if (need > w->rx_cap) {
                 size_t ncap = w->rx_cap ? w->rx_cap : 4096;
                 unsigned char *nb;
                 while (ncap < need) ncap *= 2;
                 nb = realloc(w->rx, ncap);
-                if (!nb) w->rx_drop = 1;                   /* OOM: drop, keep old buffer */
+                if (!nb) w->rx_drop = 1;
                 else { w->rx = nb; w->rx_cap = ncap; }
             }
             if (!w->rx_drop && len) { memcpy(w->rx + w->rx_len, in, len); w->rx_len += len; }
@@ -188,24 +224,26 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
                 if (lws_frame_is_binary(wsi)) {
                     if (w->o.on_binary) w->o.on_binary(w->o.user, w->rx, w->rx_len);
                 } else if (w->o.on_text) {
-                    w->rx[w->rx_len] = '\0';               /* room reserved by the +1 above */
+                    w->rx[w->rx_len] = '\0';
                     w->o.on_text(w->o.user, (const char *) w->rx, w->rx_len);
                 }
             }
-            w->rx_len = 0; w->rx_drop = 0;                 /* reset for the next message (buffer kept) */
+            w->rx_len = 0; w->rx_drop = 0;
         }
         break;
     }
 
     case LWS_CALLBACK_CLIENT_WRITEABLE: {
         es_ws_msg_t *m;
-        if (w->want_ping) {                     /* latency probe: send a ws PING with a timestamp */
+        if (!w) break;
+        if (w->kill) return -1;                        /* teardown: close now */
+        if (w->want_ping) {
             unsigned char pbuf[LWS_PRE + sizeof(long)];
             w->want_ping = 0;
             w->ping_sent_ms = es_now_ms();
             memcpy(pbuf + LWS_PRE, &w->ping_sent_ms, sizeof(long));
             lws_write(wsi, pbuf + LWS_PRE, sizeof(long), LWS_WRITE_PING);
-            lws_callback_on_writable(wsi);      /* come back to flush queued audio */
+            lws_callback_on_writable(wsi);
             break;
         }
         m = es_dequeue(w);
@@ -214,13 +252,13 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
             int n = lws_write(wsi, m->buf + LWS_PRE, m->len, wp);
             free(m);
             if (n < 0) return -1;
-            if (w->head) lws_callback_on_writable(wsi);   /* more to send */
+            if (w->head) lws_callback_on_writable(wsi);
         }
         break;
     }
 
-    case LWS_CALLBACK_CLIENT_RECEIVE_PONG:      /* latency probe reply */
-        if (w->ping_sent_ms) {                  /* guarded: es_ws_get_stats reads rtt_ms under mu */
+    case LWS_CALLBACK_CLIENT_RECEIVE_PONG:
+        if (w && w->ping_sent_ms) {
             pthread_mutex_lock(&w->mu);
             w->rtt_ms = es_now_ms() - w->ping_sent_ms;
             pthread_mutex_unlock(&w->mu);
@@ -228,13 +266,18 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
         break;
 
     case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-        w->connected = 0; w->wsi = NULL;
-        if (w->o.on_event) w->o.on_event(w->o.user, 0, -1, in ? (const char *) in : "connect error");
-        break;
-
     case LWS_CALLBACK_CLIENT_CLOSED:
-        w->connected = 0; w->wsi = NULL;
-        if (w->o.on_event) w->o.on_event(w->o.user, 0, 0, "closed");
+        /* Only flag state + notify here. Unlink/finalize/free happens on the service
+         * thread in es_pool_service (outside lws_service), so w is never freed while
+         * lws might still deliver a callback for this wsi. */
+        if (!w) break;
+        w->connected = 0;
+        w->wsi = NULL;
+        if (!w->suppress_events && w->o.on_event) {
+            int code = (reason == LWS_CALLBACK_CLIENT_CONNECTION_ERROR) ? -1 : 0;
+            w->o.on_event(w->o.user, 0, code,
+                          in ? (const char *) in : (code < 0 ? "connect error" : "closed"));
+        }
         break;
 
     default:
@@ -244,77 +287,141 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
 }
 
 static const struct lws_protocols es_protocols[] = {
-    { "earshot", es_cb, 0, 65536 },   /* remaining fields zero-initialized */
-    { 0 }                             /* terminator (portable across lws versions) */
+    { "earshot", es_cb, 0, 65536 },   /* per_session_data_size 0 -> i.userdata is the wsi user */
+    { 0 }
 };
 
-/* ---- connect + service thread ----------------------------------------- */
-static int es_connect(es_ws_t *w)
+/* ---- connect (service thread only) ------------------------------------- */
+static void es_connect(es_ws_t *w)
 {
     struct lws_client_connect_info i;
     memset(&i, 0, sizeof i);
-    i.context = w->ctx;
-    i.address = w->host;
-    i.port    = w->port;
-    i.path    = w->path;
-    i.host    = w->host;
-    i.origin  = w->host;
-    /* Advertise the vendor's ws subprotocol when it needs one. OpenAI's Realtime
-     * endpoint answers the upgrade with "Sec-WebSocket-Protocol: realtime"; if we
-     * offer anything else (or our default "earshot"), lws rejects the mismatch
-     * ("HS: PROTOCOL malformed"). Bind our callback via local_protocol_name so the
-     * wire subprotocol can differ from our internal protocol name. */
+    i.context  = w->pool->ctx;
+    i.address  = w->host;
+    i.port     = w->port;
+    i.path     = w->path;
+    i.host     = w->host;
+    i.origin   = w->host;
     i.protocol = w->o.subprotocol ? w->o.subprotocol : es_protocols[0].name;
     i.local_protocol_name = es_protocols[0].name;
     i.pwsi     = &w->wsi;
+    i.userdata = w;              /* -> es_cb `user` for this wsi */
     if (w->use_tls) {
         i.ssl_connection = LCCSCF_USE_SSL;
         if (w->o.insecure)
             i.ssl_connection |= LCCSCF_ALLOW_SELFSIGNED | LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK;
     }
-    return lws_client_connect_via_info(&i) ? 0 : -1;
+    if (!lws_client_connect_via_info(&i) && w->o.on_event && !w->suppress_events)
+        w->o.on_event(w->o.user, 0, -1, "connect failed");
 }
 
-static void *es_service_thread(void *arg)
+/* ---- pool service thread ----------------------------------------------- */
+static void *es_pool_service(void *arg)
 {
-    es_ws_t *w = (es_ws_t *) arg;
-    if (es_connect(w) != 0 && w->o.on_event)
-        w->o.on_event(w->o.user, 0, -1, "initial connect failed");
-
-    while (w->running) {
-        lws_service(w->ctx, 50);      /* service; woken early by lws_cancel_service */
-        /* Drain the outbound queue: request writable HERE, on the wsi's owning
-         * thread (es_enqueue only wakes us via lws_cancel_service). */
-        if (w->connected && w->wsi && w->head)
-            lws_callback_on_writable(w->wsi);
-        if (w->connected && w->wsi) { /* schedule an RTT ping every 5s */
-            long now = es_now_ms();
-            if (w->last_ping_ms == 0) w->last_ping_ms = now;
-            if (now - w->last_ping_ms >= 5000) {
-                w->last_ping_ms = now; w->want_ping = 1;
-                lws_callback_on_writable(w->wsi);
-            }
-        }
-        if (!w->connected && !w->wsi && w->running) {
-            if (w->o.reconnect) {
-                /* exp backoff with +/- up to half-interval jitter (thundering-herd guard).
-                 * Sleep in short slices so a concurrent es_ws_stop (running=0) is honored
-                 * within ~20ms instead of blocking pthread_join behind a multi-second sleep. */
-                int jitter = (int) (w->rng = w->rng * 1103515245u + 12345u) % (w->backoff_ms / 2 + 1);
-                int total = w->backoff_ms + jitter, slept = 0;
-                while (slept < total && w->running) { usleep(20000); slept += 20; }
-                if (!w->running) break;
-                if (w->backoff_ms < 8000) w->backoff_ms *= 2;   /* exp backoff, cap 8s */
-                pthread_mutex_lock(&w->mu);                      /* es_ws_get_stats reads under mu */
-                w->reconnects++;
-                pthread_mutex_unlock(&w->mu);
+    es_pool_ctx_t *p = (es_pool_ctx_t *) arg;
+    while (p->running) {
+        lws_service(p->ctx, 50);          /* woken early by lws_cancel_service */
+        long now = es_now_ms();
+        es_ws_t *prev = NULL, *w;
+        pthread_mutex_lock(&p->mu);
+        w = p->list;
+        while (w) {
+            es_ws_t *next = w->lnext;
+            if (w->teardown) {
+                if (w->wsi) {
+                    if (!w->kill) {           /* force the connection closed on this thread */
+                        w->kill = 1; w->suppress_events = 1;
+                        lws_set_timeout(w->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
+                        lws_callback_on_writable(w->wsi);
+                    }
+                    /* wait for CLOSED to clear w->wsi, then finalize below */
+                } else {                      /* wsi released: finalize here, off lws_service */
+                    if (prev) prev->lnext = next; else p->list = next;
+                    w->done = 1;              /* es_ws_destroy may be waiting on this */
+                    if (w->orphaned) es_free_full(w);  /* owner gave up; we own the free now */
+                    w = next; continue;       /* removed from list: don't advance prev */
+                }
+            } else if (w->want_connect) {
+                w->want_connect = 0;
                 es_connect(w);
-            } else {
-                break;
+            } else if (w->connected && w->wsi) {
+                if (w->head) lws_callback_on_writable(w->wsi);
+                if (w->last_ping_ms == 0) w->last_ping_ms = now;
+                if (now - w->last_ping_ms >= 5000) {
+                    w->last_ping_ms = now; w->want_ping = 1;
+                    lws_callback_on_writable(w->wsi);
+                }
+            } else if (!w->connected && !w->wsi && w->o.reconnect && now >= w->next_reconnect_ms) {
+                int jitter = (int) (w->rng = w->rng * 1103515245u + 12345u) % (w->backoff_ms / 2 + 1);
+                w->next_reconnect_ms = now + w->backoff_ms + jitter;   /* non-blocking backoff */
+                if (w->backoff_ms < 8000) w->backoff_ms *= 2;
+                pthread_mutex_lock(&w->mu); w->reconnects++; pthread_mutex_unlock(&w->mu);
+                es_connect(w);
             }
+            prev = w; w = next;
         }
+        pthread_mutex_unlock(&p->mu);
     }
     return NULL;
+}
+
+/* ---- pool lifecycle ---------------------------------------------------- */
+static int es_pool_init(void)   /* lazy, once */
+{
+    long cores;
+    int i, k;
+    if (g_pool.inited) return 0;
+    pthread_mutex_lock(&g_pool.mu);
+    if (g_pool.inited) { pthread_mutex_unlock(&g_pool.mu); return 0; }
+
+    cores = sysconf(_SC_NPROCESSORS_ONLN);
+    g_pool.n = (int) (cores > 0 ? cores : 1);
+    if (g_pool.n > ES_POOL_MAX) g_pool.n = ES_POOL_MAX;
+
+    for (i = 0; i < g_pool.n; i++) {
+        struct lws_context_creation_info info;
+        es_pool_ctx_t *p = &g_pool.c[i];
+        memset(&info, 0, sizeof info);
+        info.port = CONTEXT_PORT_NO_LISTEN;
+        info.protocols = es_protocols;
+        info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+        pthread_mutex_init(&p->mu, NULL);
+        p->list = NULL;
+        p->ctx = lws_create_context(&info);
+        if (!p->ctx) goto fail;
+        p->running = 1;
+        if (pthread_create(&p->thread, NULL, es_pool_service, p) != 0) {
+            p->running = 0; lws_context_destroy(p->ctx); p->ctx = NULL; goto fail;
+        }
+    }
+    g_pool.inited = 1;
+    pthread_mutex_unlock(&g_pool.mu);
+    return 0;
+
+fail:
+    for (k = 0; k <= i; k++) {
+        es_pool_ctx_t *p = &g_pool.c[k];
+        if (p->running) { p->running = 0; if (p->ctx) lws_cancel_service(p->ctx); pthread_join(p->thread, NULL); }
+        if (p->ctx) { lws_context_destroy(p->ctx); p->ctx = NULL; }
+        pthread_mutex_destroy(&p->mu);
+    }
+    g_pool.n = 0;
+    pthread_mutex_unlock(&g_pool.mu);
+    return -1;
+}
+
+void es_ws_global_shutdown(void)
+{
+    int i;
+    pthread_mutex_lock(&g_pool.mu);
+    for (i = 0; i < g_pool.n; i++) {
+        es_pool_ctx_t *p = &g_pool.c[i];
+        if (p->running) { p->running = 0; if (p->ctx) lws_cancel_service(p->ctx); pthread_join(p->thread, NULL); }
+        if (p->ctx) { lws_context_destroy(p->ctx); p->ctx = NULL; }
+        pthread_mutex_destroy(&p->mu);
+    }
+    g_pool.n = 0; g_pool.inited = 0;
+    pthread_mutex_unlock(&g_pool.mu);
 }
 
 /* ---- public API -------------------------------------------------------- */
@@ -328,7 +435,7 @@ es_ws_t *es_ws_create(const es_ws_opts_t *opts)
     w = calloc(1, sizeof(*w));
     if (!w) return NULL;
 
-    w->o = *opts;   /* shallow copy, then dup the strings we keep */
+    w->o = *opts;
     w->o.url  = es_strdup(opts->url);
     w->o.auth = es_strdup(opts->auth);
     w->o.hdr_call_id      = es_strdup(opts->hdr_call_id);
@@ -338,42 +445,40 @@ es_ws_t *es_ws_create(const es_ws_opts_t *opts)
     w->o.hdr_extra_value  = es_strdup(opts->hdr_extra_value);
     w->o.subprotocol      = es_strdup(opts->subprotocol);
     w->backoff_ms = 250;
-    w->max_queue_bytes = opts->max_queue_bytes > 0 ? (size_t) opts->max_queue_bytes : 262144; /* ~16 s mu-law */
-    w->rng = (unsigned) ((size_t) w ^ (size_t) opts->url);   /* cheap per-instance seed, no time dep */
+    w->max_queue_bytes = opts->max_queue_bytes > 0 ? (size_t) opts->max_queue_bytes : 262144;
+    w->rng = (unsigned) ((size_t) w ^ (size_t) opts->url);
 
-    /* parse url (lws_parse_uri mutates its buffer) */
     strncpy(tmp, opts->url, sizeof tmp - 1); tmp[sizeof tmp - 1] = 0;
     if (lws_parse_uri(tmp, &prot, &ads, &port, &path) != 0) { es_ws_destroy(w); return NULL; }
     w->use_tls = (!strcasecmp(prot, "wss") || !strcasecmp(prot, "https"));
     w->port = port;
     snprintf(w->host, sizeof w->host, "%s", ads);
-    snprintf(w->path, sizeof w->path, "/%s", path);   /* lws strips the leading '/' */
+    snprintf(w->path, sizeof w->path, "/%s", path);
 
     return w;
 }
 
 int es_ws_start(es_ws_t *w)
 {
-    struct lws_context_creation_info info;
+    es_pool_ctx_t *p;
     if (!w) return -1;
-
-    memset(&info, 0, sizeof info);
-    info.port = CONTEXT_PORT_NO_LISTEN;   /* client only */
-    info.protocols = es_protocols;
-    info.user = w;
-    info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
-    if (w->o.ca_file)   info.client_ssl_ca_filepath = w->o.ca_file;
-    if (w->o.cert_file) info.client_ssl_cert_filepath = w->o.cert_file;
-    if (w->o.key_file)  info.client_ssl_private_key_filepath = w->o.key_file;
-
-    w->ctx = lws_create_context(&info);
-    if (!w->ctx) return -1;
+    if (es_pool_init() != 0) return -1;
 
     pthread_mutex_init(&w->mu, NULL);
-    w->running = 1;
-    if (pthread_create(&w->thread, NULL, es_service_thread, w) != 0) {
-        w->running = 0; lws_context_destroy(w->ctx); w->ctx = NULL; return -1;
-    }
+    /* round-robin assignment to a pool context */
+    pthread_mutex_lock(&g_pool.mu);
+    p = &g_pool.c[g_pool.rr++ % (unsigned) g_pool.n];
+    pthread_mutex_unlock(&g_pool.mu);
+    w->pool = p;
+    w->alive = 1;
+    w->want_connect = 1;
+    w->next_reconnect_ms = 0;
+
+    pthread_mutex_lock(&p->mu);
+    w->lnext = p->list; p->list = w;
+    pthread_mutex_unlock(&p->mu);
+
+    lws_cancel_service(p->ctx);   /* wake the service thread to run the connect */
     return 0;
 }
 
@@ -394,29 +499,48 @@ void es_ws_get_stats(es_ws_t *w, es_ws_stats_t *out)
     pthread_mutex_unlock(&w->mu);
 }
 
+/* Request teardown: the connection goes away, but w stays a valid handle until
+ * es_ws_destroy reclaims it. Idempotent and non-blocking.
+ *
+ * suppress_events is set HERE, synchronously, before returning: the owner (mod_earshot)
+ * frees its per-stream state right after destroy, so the service thread must fire no
+ * further on_event/on_text/on_binary once teardown is requested. A callback already
+ * in-flight when this flips is still safe — es_ws_destroy waits for the service thread
+ * to go quiescent (w->done) before the owner frees anything. */
 void es_ws_stop(es_ws_t *w)
 {
-    if (!w || !w->running) return;
-    w->running = 0;
-    if (w->ctx) lws_cancel_service(w->ctx);   /* wake the loop so it can exit */
-    pthread_join(w->thread, NULL);
-    es_drain(w);
-    free(w->rx); w->rx = NULL; w->rx_len = w->rx_cap = 0;   /* service thread is joined; safe to free */
-    if (w->ctx) { lws_context_destroy(w->ctx); w->ctx = NULL; }
-    pthread_mutex_destroy(&w->mu);
+    es_pool_ctx_t *p;
+    if (!w || !w->pool) return;
+    p = w->pool;
+    pthread_mutex_lock(&p->mu);
+    if (w->alive) { w->alive = 0; w->teardown = 1; w->suppress_events = 1; }
+    pthread_mutex_unlock(&p->mu);
+    lws_cancel_service(p->ctx);           /* wake the service thread to close us */
 }
 
 void es_ws_destroy(es_ws_t *w)
 {
+    es_pool_ctx_t *p;
+    int spins;
     if (!w) return;
-    if (w->running) es_ws_stop(w);
-    free((void *) w->o.url);
-    free((void *) w->o.auth);
-    free((void *) w->o.hdr_call_id);
-    free((void *) w->o.hdr_channel_uuid);
-    free((void *) w->o.hdr_correlation);
-    free((void *) w->o.hdr_extra_name);
-    free((void *) w->o.hdr_extra_value);
-    free((void *) w->o.subprotocol);
-    free(w);
+
+    if (!w->pool) { es_free_full(w); return; }   /* never started (e.g. create failed) */
+
+    p = w->pool;
+    es_ws_stop(w);
+
+    /* Wait for the service thread to release the wsi, run any in-flight callback to
+     * completion (w is still valid meanwhile), and unlink us. This is what lets the
+     * owner safely free its per-stream state the instant we return: once w->done is
+     * set the service thread has provably stopped touching w. Teardown normally
+     * completes in a few service ticks (suppress_events already muted the callbacks,
+     * and the wsi is force-closed). The generous bound only guards against a wsi that
+     * refuses to die; on timeout we hand ownership off rather than free under it —
+     * suppress_events means no callback can still reference the owner's state either way.
+     * Whoever wins the p->mu race frees exactly once; the loser never touches w. */
+    for (spins = 0; !w->done && spins < 5000; spins++) usleep(1000);
+
+    pthread_mutex_lock(&p->mu);
+    if (w->done) { pthread_mutex_unlock(&p->mu); es_free_full(w); }
+    else         { w->orphaned = 1; pthread_mutex_unlock(&p->mu); }  /* service thread frees */
 }

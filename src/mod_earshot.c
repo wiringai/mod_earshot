@@ -391,7 +391,8 @@ static void es_on_ws_event(void *user, int connected, int code, const char *reas
         if (st->ready_mode == ES_READY_CONNECT) st->ready = SWITCH_TRUE;
     } else if (st->session) {
         /* code < 0 = connect/handshake failure, otherwise a normal close (incl. reconnect churn).
-         * Safe to fire from the ws thread: it is joined before the session is torn down. */
+         * Safe to fire from the ws service thread: es_ws_stop mutes further callbacks and
+         * es_ws_destroy waits for the service thread to go quiescent before we free st. */
         es_fire_event(st->session, code < 0 ? EARSHOT_EVENT_ERROR : EARSHOT_EVENT_DISCONNECTED,
                       "reason", reason ? reason : "");
     }
@@ -955,6 +956,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_earshot_load)
 
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_earshot_shutdown)
 {
+    es_ws_global_shutdown();   /* join the shared WS service-thread pool before we're unmapped */
     switch_event_free_subclass(EARSHOT_EVENT_CONNECTED);
     switch_event_free_subclass(EARSHOT_EVENT_DISCONNECTED);
     switch_event_free_subclass(EARSHOT_EVENT_ERROR);
