@@ -525,7 +525,12 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
                             es_barge_now(st);                    /* interrupt immediately */
                         } else {                                 /* defer: needs sustained speech (backchannel filter) */
                             st->barge_pending = SWITCH_TRUE;
-                            st->barge_at = switch_micro_time_now() + (switch_time_t) st->barge_min_ms * 1000;
+                            /* Wait out the VAD's silence hangover on top of barge_min_ms: `talking` stays
+                             * latched until vad_silence_ms of trailing silence, so a short backchannel's
+                             * STOP_TALKING (which cancels barge_pending) must land first. Effective filter:
+                             * a caller who keeps voicing past ~vad_voice_ms + barge_min_ms. */
+                            st->barge_at = switch_micro_time_now()
+                                         + (switch_time_t) (st->barge_min_ms + st->vad_silence_ms) * 1000;
                         }
                     }
                     if (st->vad_notify && st->ws) es_ws_send_text(st->ws, ES_TURN_START, strlen(ES_TURN_START));
@@ -703,6 +708,12 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
             if (st->vad_silence_ms) switch_vad_set_param(st->vad, "silence_ms", st->vad_silence_ms);
             if (st->vad_thresh)     switch_vad_set_param(st->vad, "thresh",     st->vad_thresh);
         }
+        /* a speech barge needs the module VAD; warn if the operator asked for one without vad=on */
+        if ((st->barge == ES_BARGE_SPEECH || st->barge == ES_BARGE_ANY) && !st->vad)
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                "earshot: interruptible=%s needs vad=on for the speech barge; "
+                "without it only DTMF (if enabled) interrupts\n",
+                st->barge == ES_BARGE_ANY ? "any" : "speech");
     }
     if (!st->proto_ctx) { stream->write_function(stream, "-ERR proto init failed\n"); return SWITCH_STATUS_FALSE; }
     st->sink.user     = st;
