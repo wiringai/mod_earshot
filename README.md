@@ -29,6 +29,9 @@ duplex, on one leg. That's the wedge — everything else builds on it. The full 
 - **Multi-stream fan-out** — agent + live transcription + supervisor on one call.
 - **Latency KPIs** — time-to-first-audio, per-turn response time, WebSocket RTT.
 - **Codecs + resampling** — G.711 µ-law/a-law + L16, transparent 8k/16k/24k.
+- **Built on libwebsockets** — the WebSocket transport rides the mature, high-performance
+  [libwebsockets](https://libwebsockets.org) library (not a hand-rolled RFC-6455 client), on a
+  shared service-loop pool that scales with sessions, not threads.
 - **Reliable + observable** — reconnect w/ jitter, bounded queue, `earshot::metrics` events,
   correlation by SIP Call-ID + channel UUID.
 - **Drop-in migration** — `uuid_audio_stream` / `audio_stream` compat runs mod_audio_stream dialplans unchanged.
