@@ -160,7 +160,7 @@ green on any runner; the module itself compiles where FS dev headers are availab
 Earshot is MIT and free to run. If you're taking it — or FreeSWITCH voice-AI generally — to
 production, the author (**xpertvoip**) offers paid help:
 
-- **Integration & POC** — a working phone-call → AI-agent bridge on your stack, live in weeks,
+- **Integration & POC** — a working phone-call → AI-agent bridge on your stack, live in days,
   against the vendor of your choice (OpenAI, Deepgram, Pipecat, or your own WebSocket agent).
 - **Bridging your SIP infrastructure to AI voice** — connect an existing FreeSWITCH / SIP carrier
   setup to real-time voice agents cleanly, with correlation, barge-in, and PCI-safe DTMF.
