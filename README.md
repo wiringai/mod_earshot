@@ -39,12 +39,12 @@ service, or — for the self-hosted Pipecat wire format — its official protobu
 | Agent / protocol             | `proto=`     | Status               |
 |------------------------------|--------------|----------------------|
 | OpenAI Realtime              | `openai`     | ✅ live-validated    |
-| Deepgram Voice Agent         | `deepgram`   | ✅ live-validated    |
+| Deepgram Voice Agent         | `deepgram`   | ✅ live-validated (SIP phone) |
 | Native (any WebSocket)       | `native`     | ✅ live-validated    |
 | Pipecat                      | `pipecat`    | ✅ validated (protobuf) |
 | ElevenLabs Conversational AI | `elevenlabs` | adapter ✓            |
 | Google Gemini Live           | `gemini`     | adapter ✓            |
-| Twilio Media Streams         | `twilio`     | adapter ✓            |
+| Twilio Media Streams         | `twilio`     | adapter ✓ · framing echo-tested |
 
 <sub>Product names and logos are trademarks of their respective owners. mod_earshot is an
 independent project and is not affiliated with, sponsored by, or endorsed by any of them.</sub>

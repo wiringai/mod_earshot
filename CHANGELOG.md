@@ -5,11 +5,16 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 
 ## [Unreleased]
 
-## [0.1.0] — 2026-08-04
+## [0.1.0] — 2026-08-05
 
-First public release. Every capability below is validated end-to-end on real SIP calls
-(`sipp` + real audio), including live OpenAI Realtime and Deepgram Voice Agent sessions;
-the Pipecat adapter is validated against Pipecat's official protobuf schema.
+First public release. The transport, full-duplex audio path, and playout are validated
+end-to-end on real SIP calls with real audio — live OpenAI Realtime and Deepgram Voice
+Agent sessions (the Deepgram one from a hardware SIP phone), plus a shared-pool
+concurrency + soak load test. Adapter coverage is deliberately stated per vendor, not
+blanket: `openai`, `deepgram`, and `native` are live-validated on a real call; `pipecat`
+against Pipecat's official protobuf schema; `twilio` via a WebSocket echo round-trip;
+`elevenlabs` and `gemini` are implemented but **not yet live-validated** (see the adapter
+status table in the README).
 
 ### Added
 
@@ -31,7 +36,15 @@ the Pipecat adapter is validated against Pipecat's official protobuf schema.
   (transcription / supervisor); per-stream lifecycle and metrics.
 - **Latency KPIs** — `first_audio_ms`, per-turn `response_ms`/`response_ms_max`+`turns`, and
   `ws_rtt_ms` (WebSocket ping/pong probe).
-- **Reliability** — auto-reconnect with jittered backoff; bounded outbound queue (drop-oldest).
+- **Scales with sessions, not threads** — all streams share a small pool of libwebsockets
+  service contexts (sized to CPU cores), not a thread + context per stream. Adds ~0 WebSocket
+  threads and ~1 MB per session (vs ~1 dedicated thread + ~17 MB before), so a small box holds
+  thousands of sessions where thread-per-stream hit a RAM wall near ~420. Validated: 150
+  concurrent streams, a 12-minute soak with flat memory/fds/threads, mass-teardown + RST-storm
+  with no crash, module unload under live load, and a ThreadSanitizer-clean fuzz run.
+- **Reliability** — auto-reconnect with jittered backoff (reset only after a link proves stable),
+  a **liveness timeout** that drops a hung/half-open peer and reconnects, and a bounded outbound
+  queue (drop-oldest). Agent playout is buffered to hold a full burst-delivered response in order.
 - **Observability** — `earshot::metrics` events (periodic / on-close / on-demand JSON); reserved
   custom subclasses; correlation by SIP Call-ID + channel UUID on the handshake.
 - **mod_audio_stream compat** — `uuid_audio_stream` / `audio_stream` positional syntax, registered

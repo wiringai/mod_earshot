@@ -112,12 +112,14 @@ Legend: ☐ todo · ◐ in progress · ☑ done
   only the agent owns `WRITE_REPLACE` so forks never fight over playback. Every verb targets a stream by
   `id=`. **VALIDATED**: 3 streams on one channel all received caller audio; agent played back, forks
   didn't; per-stream stop worked. (☐ next: `track=both` caller+agent mix for the supervisor; mask-all-streams.)
-- ☐ **Shared lws service thread / event loop (the #1 concurrency ceiling).** Today each stream owns
-  its own `pthread` + `lws_context`, so N sessions ≈ 2·N threads. A load test saturated a
-  2-vCPU VM's CPU around ~150–200 concurrent sessions (~2 threads and ~17 MB per session), degrading
-  gracefully with no crash. libwebsockets can service thousands of connections from one context/thread;
-  moving to a shared service loop (a small pool sized to cores, many `wsi` each) would remove the
-  thread-per-stream overhead and let concurrency scale with RAM rather than thread count.
+- ☑ **Shared lws service thread / event loop (was the #1 concurrency ceiling).** DONE. All streams
+  now share a small pool of `lws_context`s sized to CPU cores, each driven by one service thread with
+  rate-limited housekeeping and per-frame writable arming (`EVENT_WAIT_CANCELLED`). Per session: ~0
+  added WS threads and ~1 MB (vs ~1 thread + ~17 MB before). **VALIDATED** on an 8 GB box vs the old
+  thread-per-stream build (same box, same load): 150 concurrent streams (RSS +139 MB vs +2.4 GB, ~17×
+  less), 12-minute soak flat, mass-teardown + RST-storm no-crash, unload-under-load clean, dead-peer
+  liveness detection, ThreadSanitizer-clean fuzz, and audio cadence/quality byte-equal to the old
+  transport on a real SIP call. Reviewed via self + three adversarial peer passes.
 - ☐ Per-stream jitter buffer tuning; adaptive frame sizing
 - ☐ Optional simultaneous recording fork
 - ☑ **`uuid_audio_stream` / `audio_stream` compat shim** — mod_audio_stream's positional syntax
