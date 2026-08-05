@@ -1,15 +1,15 @@
 # Earshot Roadmap
 
-Goal: the reliable, protocol-flexible FreeSWITCH↔AI audio bridge — matured privately,
-then published. Tiers are ordered by adoption leverage, not difficulty.
+Goal: the reliable, protocol-flexible FreeSWITCH↔AI audio bridge. Tiers are ordered by
+adoption leverage, not difficulty; ☑ items ship in 0.1.0, ☐/◐ are what's next.
 
 Legend: ☐ todo · ◐ in progress · ☑ done
 
 ## Tier 0 — Foundation (make it real)
 
-- ☐ Module skeleton: load/unload, `earshot` app+API, media-bug tap, session locate
-- ☑ WebSocket transport (libwebsockets), ws + wss (`es_ws.c`) — **VALIDATED on a test environment**
-- ☑ **FULL-DUPLEX VALIDATED on a real inbound SIP call (sipp → FreeSWITCH, test environment):**
+- ☑ Module skeleton: load/unload, `earshot` app+API, media-bug tap, session locate
+- ☑ WebSocket transport (libwebsockets), ws + wss (`es_ws.c`) — **VALIDATED**
+- ☑ **FULL-DUPLEX VALIDATED on a real inbound SIP call (sipp → FreeSWITCH):**
   - one answered caller-facing leg, stereo-recorded (`record_session`, 5.8 s), both directions non-silent
     at once — this is the real proof, not a synthetic loopback:
   - send (caller→agent): sipp streamed a G.711 PCAP in; recorded READ max=16896 / rms=2007, and the
@@ -17,11 +17,12 @@ Legend: ☐ todo · ◐ in progress · ☑ done
   - playback (agent→caller): `WRITE_REPLACE` injected the agent's tone into the caller path;
     recorded WRITE max=7932 / rms=5626.
   - `X-Call-ID` correlation header arrived at the agent (`Call-ID=1-123846@…`); FS never crashed.
-  - harness: dedicated `earshot-test` sofia profile on :5090 (own context, `auth-calls=false`, RTP on the
-    internal IP) so the call stays isolated on the host.
+  - harness: a dedicated `earshot-test` sofia profile on :5090 (own context, `auth-calls=false`) so the
+    call runs fully isolated from any other routing on the box.
   - `earshot status` reports live stats: `{ws_connected, ready, rx_frames, play_buffered}`.
 - ☑ (bugfix) never request `SMBF_WRITE_REPLACE` without setting a replace frame each callback — NULL-derefs FS
-- ☑ playback buffer capped (~2 s) so it can't grow unbounded on a leg that isn't written to
+- ☑ playback buffer bounded (sized to hold a full agent response, which realtime vendors burst
+  faster than realtime) so it plays a whole reply in order yet can't grow unbounded
 - Note: an earlier synthetic loopback could only carry one direction per leg (b-leg = read/send,
   a-leg = written/playback); a real SIP caller leg carries both, which is what the sipp run above exercises.
 - ☑ **Codec layer** — L16 + G.711 μ-law/a-law (`es_codec.c`), **unit-tested** (`test/test_codec.c`)
@@ -32,7 +33,7 @@ Legend: ☐ todo · ◐ in progress · ☑ done
 - ◐ `earshot::` events (connected/disconnected/error/message/playback) — plumbing in place
 - ☑ **CMake** (module + CTest for the portable core) · ◐ CI matrix (FS 1.10/1.11 · Debian/Ubuntu)
 - ☐ Prebuilt `.deb` + Docker build image as CI release artifacts
-- ◐ Test harness: ☑ mock WS agent (`test/mock_agent.py`); ☐ full audio round-trip (needs WS transport)
+- ☑ Test harness: mock WS agent (`test/mock_agent.py`) + full audio round-trip validated on real SIP calls
 
 ## Tier 1 — Reliability (why people switch)
 
@@ -56,8 +57,10 @@ Legend: ☐ todo · ◐ in progress · ☑ done
 
 - ☑ **Protocol adapters** (`es_proto.c`): `native`, `twilio`, `openai`, `deepgram`, `elevenlabs`,
   `gemini`, `pipecat` — an agent written for any of these works against Earshot unmodified.
-  - **All seven VALIDATED on real SIP calls** (in testing) against emulated vendor servers — clean full
-    duplex (recorded READ=16896 / WRITE≈7932 each). Real-vendor interop still needs live keys.
+  - **`openai` and `deepgram` are live-validated against the real vendors** on real SIP calls
+    (Deepgram from a hardware SIP phone); `native`, `twilio`, and `pipecat` are validated by full-duplex
+    round-trip against a local echo agent; `elevenlabs` and `gemini` are implemented but not yet
+    live-validated (see the README status table). Framing detail per adapter:
     - `twilio`: `connected`+`start` framing, base64 μ-law media both ways, **mark echo-on-drain**.
     - `openai`: `session.update` handshake (g711_ulaw + server_vad), append out / delta in,
       `realtime` subprotocol, `speech_started` = barge-in.
@@ -93,7 +96,10 @@ Legend: ☐ todo · ◐ in progress · ☑ done
   FreeSWITCH for a secure collector. **VALIDATED on real RFC2833**: in-window digit suppressed from the
   agent (audit event still fired, redacted), audio froze to 0 frames while masked, both resumed after.
 - ☐ Opus over WS (low-bitrate WAN links)
-- ☐ App-level auth: `Bearer` token + mTLS client cert in the handshake
+- ☑ App-level auth: full `Authorization` header (e.g. `Bearer <key>`, Deepgram `Token <key>`) via the
+  `EARSHOT_AUTH` channel variable, sent verbatim on the WS handshake — validated live against OpenAI +
+  Deepgram. (☐ per-stream mTLS client cert: not offered while streams share pooled lws contexts, since
+  lws binds client TLS material per context, not per connection — a future context-partitioning item.)
 
 ## Tier 3 — Scale & observability
 
@@ -120,7 +126,8 @@ Legend: ☐ todo · ◐ in progress · ☑ done
   less), 12-minute soak flat, mass-teardown + RST-storm no-crash, unload-under-load clean, dead-peer
   liveness detection, ThreadSanitizer-clean fuzz, and audio cadence/quality byte-equal to the old
   transport on a real SIP call. Reviewed via self + three adversarial peer passes.
-- ☐ Per-stream jitter buffer tuning; adaptive frame sizing
+- ☐ Per-stream **adaptive** jitter buffer (a fixed prebuffer was tried and reverted — its re-cushioning
+  inserted audible artifacts; the win needs an adaptive, underrun-driven design); adaptive frame sizing
 - ☐ Optional simultaneous recording fork
 - ☑ **`uuid_audio_stream` / `audio_stream` compat shim** — mod_audio_stream's positional syntax
   (`start <url> <mix> <rate>`, stop/pause/resume/send_text) translated to Earshot (native L16 at the
@@ -134,19 +141,13 @@ Legend: ☐ todo · ◐ in progress · ☑ done
 - Not a media server or SFU (that's LiveKit's job) — Earshot is the FreeSWITCH-side tap.
 - Not an agent framework — it feeds pipecat / your own WS server, doesn't replace them.
 
-## Release plan
+## Releases
 
-- **v0.1 (private):** Tier 0 + reconnect/ready-gate/μ-law from Tier 1. Dogfood on the
-  audio test harness (not prod).
-- **v0.2 (private):** rest of Tier 1 + Twilio adapter + correlation + barge-in.
-- **v1.0 (public):** Tiers 0–2 solid, docs + pipecat quickstart + demo video, CI releases,
-  metrics. Announce.
-- **post-1.0:** Tier 3, community-driven from the issue tracker.
-
-## Growth playbook
-
-1. Mine the upstream module's open issues → a pre-validated backlog of real needs.
-2. README + a 60-second demo (phone call → talking LLM) + a copy-paste pipecat quickstart.
-3. Tagged releases + fast issue triage — responsiveness is the whole differentiator.
-4. Cross-promote with the *Signal & Stream* book (Ch. 12 audio contract, Ch. 14 barge-in
-   & latency document this module; the module gives the book a real companion repo).
+- **0.1.0 — first public release.** Tiers 0–2 solid (full-duplex bridge, seven protocol
+  adapters, control channel, VAD/barge-in, DTMF + PCI masking) plus the Tier 3 shared
+  service-loop transport, metrics, latency KPIs, and multi-stream fan-out. `openai`,
+  `deepgram`, and `native` are live-validated on real SIP calls; the remaining adapters
+  are implemented and mock/echo-tested (see the README status table).
+- **Next:** the ☐ items above, community-driven from the issue tracker — Opus, per-action
+  command scoping, `track=both` supervisor mix, and live-validation of the Gemini and
+  ElevenLabs adapters.
