@@ -72,6 +72,58 @@ FreeSWITCH event socket — the whole call is observable, the agent untouched.
 
 ---
 
+## Event socket (ESL) — the whole call, as typed events
+
+Everything Earshot observes is published as **FreeSWITCH custom events**, so an application follows a
+call without touching the media path, the agent, or the WebSocket. Nothing extra to run: FreeSWITCH's
+**Event Socket Layer (ESL)** is already a live subscriber to the event bus, so any ESL client — `fs_cli`,
+Node (`modesl`), Python (`greenswitch`), Go — receives them the instant they fire. Every event is tagged
+with the channel `Unique-ID` and the correlation id, so you can act on one specific call.
+
+Earshot fires **nine typed events** (subclass `earshot::…`):
+
+| Event | Fires when | Key headers |
+|---|---|---|
+| `earshot::connected` | WebSocket handshake to the agent completes | `url` |
+| `earshot::ready` | playback gate opens — the caller won't answer into silence | `corr` |
+| `earshot::speech_started` / `…stopped` | module-side VAD marks a caller turn boundary | `corr` |
+| `earshot::dtmf` | caller pressed a digit (redacted inside a PCI mask window) | `digit` \| `masked` |
+| `earshot::command` | the agent ran a whitelisted call-control action (audit trail) | `action`, `api`, `ok`, `result` |
+| `earshot::metrics` | periodic / on-close / on-demand | latency KPIs + counters |
+| `earshot::disconnected` / `…error` | the agent socket closed / failed | `reason` |
+
+Subscribe from `fs_cli` (any ESL client uses the same wire command):
+
+```
+event plain CUSTOM earshot::metrics
+```
+
+A live `earshot::metrics` frame — exactly the headers your app reads:
+
+```
+Event-Subclass:  earshot::metrics
+corr:            4a9b8c…@carrier     # = SIP Call-ID — the key that joins your logs
+stream-id:       default
+first-audio-ms:  62                   # call answered → agent's first word
+response-ms:     340                  # last caller-stop → agent-start, per turn
+response-ms-max: 610
+ws-rtt-ms:       1                    # transport health, sampled via ping/pong
+```
+
+**What you build with it** — no agent instrumentation, no polling:
+
+- a live **"caller is speaking"** UI or barge-in indicator (`speech_started` / `speech_stopped`),
+- a per-call **latency scoreboard / p95 alert** (`metrics` → Prometheus/OTel),
+- a **compliance audit log** of every agent-driven action (`command`) and DTMF (`dtmf`),
+- call routing / hand-off logic gated on `ready`, `disconnected`, or `error`.
+
+Because every event carries the **two-key trace** (SIP `Call-ID` ↔ channel `UUID`), one call stitches
+together across your load balancer, FreeSWITCH, the agent, and your logs — you write no correlation
+plumbing. That's the step up from a raw audio pipe: where `mod_audio_stream` relays the agent's
+messages as one generic event, Earshot emits a **typed call lifecycle** an application can act on directly.
+
+---
+
 ## 60-second quickstart
 
 **1. Build & install** (needs FreeSWITCH dev headers + `libwebsockets-dev`):
