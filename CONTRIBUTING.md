@@ -47,7 +47,8 @@ Two build targets:
 - The module compiles where FS headers are available (`docker build --build-arg SW_TOKEN=…`).
 - New behavior is reflected in `docs/API.md` and, if it changes the wire, `docs/ARCHITECTURE.md`
   and `FEATURES.md`; add a `test/` case where the logic is testable off-box.
-- Validate the audio path end-to-end with the `sipp` + `test/mock_agent.py` harness where relevant.
+- Validate the audio path end-to-end where relevant: `test/mock_agent.py` is a reference agent that
+  speaks every wire protocol with no vendor keys — drive a call into it with `sipp` or a softphone.
 
 ## Good first issues
 

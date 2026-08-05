@@ -27,8 +27,9 @@ at it — but the module still treats agent input defensively:
   passthrough. Only enable it for agents you trust to drive the call.
 - **PCI/PII masking** (`mask on`) mutes caller audio and redacts DTMF to the agent; the digit value is
   never placed in the `earshot::dtmf` audit event during a masking window.
-- **Transport**: use `wss://` for agents across a network. `auth=` sets the `Authorization` header;
-  `EARSHOT_TLS_NO_HOSTNAME_CHECK` disables cert/hostname validation and is **dev-only**.
+- **Transport**: use `wss://` for agents across a network. `auth=<token>` (or the `EARSHOT_AUTH`
+  channel variable for a value containing a space, e.g. `Bearer <key>`) sets the `Authorization`
+  header; `EARSHOT_TLS_NO_HOSTNAME_CHECK` disables cert/hostname validation and is **dev-only**.
 
 Reports that require an already-compromised FreeSWITCH host or a malicious operator-supplied
 configuration are generally out of scope, but tell us anyway if the impact is surprising.
