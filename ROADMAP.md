@@ -103,6 +103,11 @@ Legend: ☐ todo · ◐ in progress · ☑ done
   client certificate on every agent connection; `EARSHOT_TLS_CA` verifies the agent against a private
   CA. One client identity per box (lws binds client TLS material at context level, applied to every
   pooled context at init). (☐ per-stream *multi-identity* mTLS still needs context-partitioning.)
+- ✗ **permessage-deflate** — considered and deliberately omitted. `mod_audio_stream` enables WebSocket
+  compression by default; earshot does not, because the payload is real-time audio: G.711/L16 frames
+  are near-incompressible, so deflate spends CPU per frame and adds latency for ~0 size gain on a path
+  where latency is the product. (Revisit only if a specific agent endpoint requires or negotiates it —
+  it would be added opt-in, off by default.)
 
 ## Tier 3 — Scale & observability
 
