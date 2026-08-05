@@ -57,7 +57,7 @@ workarounds. Earshot's `WRITE_REPLACE` path is validated with real audio, full d
 10. **Drop-in migration.** A `uuid_audio_stream` / `audio_stream` compat shim runs existing
     `mod_audio_stream` dialplans unmodified (and refuses to register if that module is still loaded).
 
-11. **MIT, tested, uncapped.** Portable core (codec, protobuf, backpressure queue) is **unit-tested**
+11. **MIT and tested.** Portable core (codec, protobuf, backpressure queue) is **unit-tested**
     off-box — including adversarial protobuf input caught in peer review — and the core call path is
     exercised end-to-end with `sipp` + real audio.
 
