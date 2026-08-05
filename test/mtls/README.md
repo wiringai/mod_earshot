@@ -68,3 +68,22 @@ Each row is a **full environment**. Restart FreeSWITCH with exactly the vars sho
 **Regression:** with **none** of the vars set (restart FS with a clean env), a normal `wss://`
 call to a public vendor (OpenAI Realtime / Deepgram) must still connect — box-level TLS is fully
 opt-in and the default path is unchanged.
+
+## 4. Automated runner (optional)
+
+`run-matrix.sh` does all four cases in one shot: for each case it writes that case's env,
+restarts FreeSWITCH, originates a call through `$TEST_EXT`, and checks the echo-server log for
+the handshake — reporting PASS/FAIL and a final verdict. It prompts before restarting FS (so it
+can't surprise a production box) and is configurable for non-systemd setups:
+
+```bash
+# needs a dialplan ext that runs `earshot start wss://localhost:9443/ ... ` and no `insecure`
+FS_ENV_FILE=/etc/default/mod_earshot-tls \
+FS_RESTART='sudo systemctl restart freeswitch' \
+TEST_EXT=5000 \
+  ./run-matrix.sh
+```
+
+It covers cases 1–4; the no-vars **regression** (a public-vendor `wss://` still connects) stays a
+manual check, since this harness's server requires a client cert and can't stand in for a public
+endpoint.
