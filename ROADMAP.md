@@ -88,8 +88,12 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
   and agent turn notify (`vad_notify=on`). Tunables `vad_mode` / `vad_voice_ms` / `vad_silence_ms`.
   **VALIDATED**: both events fired on real caller audio, `earshot_talking` flipped, `speech_starts`
   counted, agent received the turn JSON. Gives endpointing to agents that do none of their own.
-- ◐ **Barge-in**: ☑ `flush` command, Twilio `clear`, and VAD `vad_barge` all clear buffered playback
-  instantly; ☐ `earshot::playback` events
+- ☑ **Barge-in policy engine**: `interruptible=none|dtmf|speech|any` (adds DTMF-triggered barge,
+  suppressed during a masking window); `ignore_backchannel` / `sensitivity=low|medium|high` /
+  `barge_min_ms` require sustained caller speech so short backchannels don't cut the agent;
+  `barge_fade_ms` fades the playout to silence instead of a hard cut. `flush`, Twilio `clear`, OpenAI
+  `speech_started`, Deepgram `UserStartedSpeaking`, and module VAD all drive it; `barges` counter in
+  metrics. Back-compat: `vad_barge=on` = `interruptible=speech`. ☐ `earshot::playback` events
 - ☑ **DTMF capture + PCI masking**: `recv_dtmf` hook → `earshot::dtmf` events + forward to the agent
   (`dtmf=on`); a masking window (`earshot <uuid> mask on|off`, or the control-channel `mask` action)
   **mutes caller→agent audio and redacts DTMF to the agent** during card entry while digits still reach

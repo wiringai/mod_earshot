@@ -22,7 +22,12 @@ Begin streaming the channel's audio to `url` (`ws://` or `wss://`).
 | `dir` | `in` `out` `both` | `both` | `in` = caller→agent only (read-only **fork**, no playback); `both` = bidirectional agent |
 | `ready` | `firstframe` `connect` `manual` | `firstframe` | when playback opens (see [Ready gate](#ready-gate)) |
 | `vad` | `on` | off | module-side VAD → `speech_started`/`speech_stopped` |
-| `vad_barge` | `on` | off | flush playback the instant the caller speaks (barge-in) |
+| `vad_barge` | `on` | off | back-compat alias for `interruptible=speech` |
+| `interruptible` | `none` `dtmf` `speech` `any` | `none` (or `speech` if `vad_barge=on`) | what interrupts the agent's playback |
+| `ignore_backchannel` | `on` | off | require *sustained* speech before a speech-barge (drops short "yeah/okay") |
+| `sensitivity` | `low` `medium` `high` | — | preset for the sustained-speech gate (600 / 300 / 150 ms) |
+| `barge_min_ms` | `<n>` | `0` | ms of sustained caller speech before a speech-barge (`0` = immediate) |
+| `barge_fade_ms` | `<n>` | `0` | fade playback out over N ms instead of a hard cut |
 | `vad_notify` | `on` | off | also send `{"type":"speech_started"}` to the agent |
 | `vad_mode` / `vad_voice_ms` / `vad_silence_ms` | ints | `2` / `200` / `500` | VAD aggressiveness + endpointing budget |
 | `dtmf` | `on` | off | capture caller DTMF → `earshot::dtmf` + forward to the agent |

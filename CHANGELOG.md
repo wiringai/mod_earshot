@@ -13,6 +13,11 @@ All notable changes to Earshot (`mod_earshot`). Format follows
   context level; applied to every pooled context at init). Configured via process environment, read
   at module load; the client key must be an unencrypted PEM. Validated end-to-end on a real SIP call
   (FreeSWITCH 1.11.1, libwebsockets 4.0.20) with live audio over the mutually-authenticated wss leg.
+- **Barge-in policy engine** — `interruptible=none|dtmf|speech|any` (adds DTMF-triggered barge,
+  suppressed during a PCI masking window); `ignore_backchannel` / `sensitivity=low|medium|high` /
+  `barge_min_ms` require sustained caller speech so short backchannels don't cut the agent;
+  `barge_fade_ms` fades the playout to silence over a ramp instead of a hard cut. Back-compat:
+  `vad_barge=on` = `interruptible=speech`. New `barges` counter in `earshot::metrics`.
 
 ## [0.1.0] — 2026-08-05
 
