@@ -796,14 +796,14 @@ static switch_status_t es_simple(switch_core_session_t *session, const char *ver
         stream->write_function(stream,
             "{\"proto\":\"%s\",\"corr\":\"%s\",\"tx_frames\":%llu,\"tx_bytes\":%llu,"
             "\"rx_frames\":%llu,\"rx_bytes\":%llu,\"play_drops\":%llu,\"commands\":%llu,"
-            "\"speech_starts\":%llu,\"talking\":%d,\"dtmf\":%llu,\"masking\":%d,\"play_buffered\":%u,"
+            "\"speech_starts\":%llu,\"barges\":%llu,\"talking\":%d,\"dtmf\":%llu,\"masking\":%d,\"play_buffered\":%u,"
             "\"first_audio_ms\":%llu,\"response_ms\":%llu,\"response_ms_max\":%llu,\"turns\":%llu,"
             "\"ws_connected\":%d,\"ws_reconnects\":%u,\"ws_queue_drops\":%llu,\"ws_rtt_ms\":%ld}\n",
             es_proto_name(st->proto), st->corr,
             (unsigned long long) st->tx_frames, (unsigned long long) st->tx_bytes,
             (unsigned long long) st->rx_frames, (unsigned long long) st->rx_bytes,
             (unsigned long long) st->play_drops, (unsigned long long) st->commands,
-            (unsigned long long) st->speech_starts, st->talking,
+            (unsigned long long) st->speech_starts, (unsigned long long) st->barges, st->talking,
             (unsigned long long) st->dtmf_count, st->masking,
             st->play_buf ? (unsigned) switch_buffer_inuse(st->play_buf) : 0,
             (unsigned long long) st->first_audio_ms, (unsigned long long) st->resp_ms_last,
