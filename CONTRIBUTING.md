@@ -52,4 +52,8 @@ Two build targets:
 ## Good first issues
 
 See [ROADMAP.md](ROADMAP.md) for open items (e.g. `track=both` supervisor mixing, Opus, a Prometheus
-textfile exporter). The upstream `mod_audio_stream` issue tracker is also a good source of real needs.
+textfile exporter).
+
+## Code of conduct
+
+By participating, you agree to abide by the [Code of Conduct](CODE_OF_CONDUCT.md).

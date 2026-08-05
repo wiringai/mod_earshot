@@ -35,5 +35,5 @@ configuration are generally out of scope, but tell us anyway if the impact is su
 
 ## Supported versions
 
-Pre-release: the latest `main` / newest tag is supported. A support matrix will accompany the first
-stable (`1.0`) release.
+The latest tagged release (currently **0.1.0**) and the `main` branch are supported: fixes land on
+`main` and in the next tagged release. A formal support matrix will accompany the `1.0` release.
