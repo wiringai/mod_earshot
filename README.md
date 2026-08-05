@@ -171,8 +171,8 @@ production, the author (**xpertvoip**) offers paid help:
   earshot or a FreeSWITCH voice-AI platform.
 - **Training & workshops** — "Production Voice-AI on FreeSWITCH" for your team.
 
-📧 **[varunmacid@gmail.com](mailto:varunmacid@gmail.com)** — tell me your stack and what you're
-building. *(A dedicated services page is on the way.)*
+📧 **[xpertvoipai@gmail.com](mailto:xpertvoipai@gmail.com)** — tell me your stack and what you're
+building.
 
 ## Naming
 

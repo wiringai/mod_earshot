@@ -6,7 +6,7 @@ Please report security issues **privately** — do not open a public issue for a
 
 - Use GitHub's **[Report a vulnerability](https://github.com/wiringai/mod_earshot/security/advisories/new)**
   (Security → Advisories), or
-- email the maintainer (see the commit author / `git log`).
+- email **xpertvoipai@gmail.com**.
 
 Include: affected version/commit, a description, and a minimal reproduction (a crafted WebSocket frame,
 dialplan, or call flow). We aim to acknowledge within a few days and to ship a fix or mitigation before
