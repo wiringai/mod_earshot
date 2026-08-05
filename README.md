@@ -46,9 +46,6 @@ service, or — for the self-hosted Pipecat wire format — its official protobu
 | Google Gemini Live           | `gemini`     | adapter ✓            |
 | Twilio Media Streams         | `twilio`     | adapter ✓ · framing echo-tested |
 
-<sub>Product names and logos are trademarks of their respective owners. mod_earshot is an
-independent project and is not affiliated with, sponsored by, or endorsed by any of them.</sub>
-
 ---
 
 ## Observability & AI latency — built for scale
