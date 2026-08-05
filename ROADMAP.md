@@ -107,11 +107,21 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
   trust store box-wide**, so public-CA endpoints (OpenAI/Deepgram) then fail unless they also chain to
   it. One client identity per box (lws binds client TLS material at context level, applied to every
   pooled context at init). (☐ per-stream *multi-identity* mTLS still needs context-partitioning.)
-- ✗ **permessage-deflate** — considered and deliberately omitted. `mod_audio_stream` enables WebSocket
-  compression by default; earshot does not, because the payload is real-time audio: G.711/L16 frames
-  are near-incompressible, so deflate spends CPU per frame and adds latency for ~0 size gain on a path
-  where latency is the product. (Revisit only if a specific agent endpoint requires or negotiates it —
-  it would be added opt-in, off by default.)
+- ✗ **permessage-deflate** — considered and deliberately omitted (a non-goal, not a gap). WebSocket
+  compression (RFC 7692) shrinks text/JSON well, which is why general-purpose clients like
+  `mod_audio_stream` turn it on by default. It is the wrong fit for a real-time **voice** bridge, for
+  four reasons:
+  1. **Audio doesn't compress** — G.711 is already a codec and L16 is high-entropy PCM, so deflate
+     saves ~0% on a payload where bandwidth was never the bottleneck.
+  2. **It adds latency** — a compress/decompress step on every 20 ms frame, on the exact metric
+     (time-to-first-audio, per-turn response) that is the product.
+  3. **CPU per frame** — ~50 frames/sec/call of pointless compression lowers per-box concurrency.
+  4. **Memory per connection** — deflate keeps a ~32 KB sliding window *per connection*, which at
+     thousands of sessions undercuts the shared pool's ~1 MB/session efficiency.
+
+  Net: all cost, no benefit for audio — so "on by default" (as upstream ships it) is a mis-default
+  here, not an advantage. It would only ever be added **opt-in, off by default**, purely to satisfy an
+  endpoint that requires or negotiates it.
 
 ## Tier 3 — Scale & observability
 
