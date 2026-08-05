@@ -87,3 +87,28 @@ TEST_EXT=5000 \
 It covers cases 1–4; the no-vars **regression** (a public-vendor `wss://` still connects) stays a
 manual check, since this harness's server requires a client cert and can't stand in for a public
 endpoint.
+
+## 5. Standalone verifier — no FreeSWITCH (fast local gate)
+
+`test_mtls_client.c` compiles the **real `es_ws.c` transport** into a tiny client and drives it
+against the echo server — so you can verify the mTLS handshake itself (cert presented, custom CA
+honored, guards firing) without a full FreeSWITCH build. It reads the same `EARSHOT_TLS_*` env vars.
+
+```bash
+# Linux (libwebsockets-dev): system openssl headers are already on the include path
+gcc test_mtls_client.c ../../src/es_ws.c -I../../src \
+    $(pkg-config --cflags --libs libwebsockets) -lpthread -o test_mtls_client
+# macOS/brew also needs: -I"$(brew --prefix openssl@3)/include" and DYLD_LIBRARY_PATH set to the libs
+
+./gen-certs.sh && python3 mtls_echo_server.py &           # server on localhost:9443
+D=$PWD
+EARSHOT_TLS_CLIENT_CERT=$D/client.pem EARSHOT_TLS_CLIENT_KEY=$D/client.key EARSHOT_TLS_CA=$D/ca.pem \
+  ./test_mtls_client wss://localhost:9443/                # -> RESULT: CONNECTED (exit 0)
+EARSHOT_TLS_CLIENT_CERT=$D/client.pem EARSHOT_TLS_CLIENT_KEY=$D/client.key EARSHOT_TLS_CA=$D/bogus-ca.pem \
+  ./test_mtls_client wss://localhost:9443/                # -> NOT-CONNECTED, tls=invalidca (exit 1)
+```
+
+`ES_TEST_VERBOSE=1` turns on libwebsockets TLS logging; `ES_TEST_INSECURE=1` skips server-cert
+verification. This verifier exercises earshot's actual TLS code path — it's what confirmed the mTLS
+handshake works end-to-end (client cert accepted, `EARSHOT_TLS_CA` enforced via `X509_V_ERR`, the
+readability + both-or-neither guards firing) without the media/dialplan layer.

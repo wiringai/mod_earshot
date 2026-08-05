@@ -23,7 +23,9 @@ async def echo(ws, *args):                    # *args: tolerate the 2-arg (ws, p
         await ws.send(msg)
 
 async def main():
-    async with websockets.serve(echo, "0.0.0.0", 9443, ssl=ctx):
+    # bind "localhost" (both ::1 and 127.0.0.1) — a wss client resolving localhost to IPv6 must
+    # still reach us; 0.0.0.0 is IPv4-only and would leave an IPv6-first client unable to connect.
+    async with websockets.serve(echo, "localhost", 9443, ssl=ctx):
         print("mTLS echo server on wss://localhost:9443/  (Ctrl-C to stop)")
         await asyncio.Future()
 
