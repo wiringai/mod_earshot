@@ -32,6 +32,8 @@
 /* turn notifications sent to the agent (vad_notify=on) */
 #define ES_TURN_START "{\"type\":\"speech_started\"}"
 #define ES_TURN_STOP  "{\"type\":\"speech_stopped\"}"
+#define ES_PLAY_BUF_MAX (2 * 1024 * 1024)  /* play-buffer cap: must fit a full burst-delivered
+                                            * agent response (see es_sink_audio) */
 
 #define EARSHOT_BUG_NAME           "earshot"
 
@@ -292,7 +294,13 @@ static void es_sink_audio(void *user, const int16_t *pcm, size_t nsamples)
     }
     if (!st->play_buf) return;
     switch_mutex_lock(st->play_mutex);
-    if (switch_buffer_inuse(st->play_buf) < 32000)   /* ~2 s @ 8 kHz L16 */
+    /* The cap must hold an ENTIRE agent response, not just a jitter cushion: realtime
+     * vendors (OpenAI GA especially) deliver a full answer several times faster than
+     * realtime, so a small cap chops every long reply ~2s in — heard as mingled /
+     * overlapped fragments (drops counted, audibly confirmed on a live phone test).
+     * 2MB = ~130s @8k L16 / ~65s @16k. Barge-in flush still empties it instantly,
+     * and the cap still bounds a stuck playback. */
+    if (switch_buffer_inuse(st->play_buf) < ES_PLAY_BUF_MAX)
         switch_buffer_write(st->play_buf, pcm, nsamples * 2);
     else
         st->play_drops++;                  /* playback isn't draining: drop new agent audio */
