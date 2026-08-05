@@ -98,8 +98,11 @@ Legend: ☐ todo · ◐ in progress · ☑ done
 - ☐ Opus over WS (low-bitrate WAN links)
 - ☑ App-level auth: full `Authorization` header (e.g. `Bearer <key>`, Deepgram `Token <key>`) via the
   `EARSHOT_AUTH` channel variable, sent verbatim on the WS handshake — validated live against OpenAI +
-  Deepgram. (☐ per-stream mTLS client cert: not offered while streams share pooled lws contexts, since
-  lws binds client TLS material per context, not per connection — a future context-partitioning item.)
+  Deepgram.
+- ☑ **Box-level mTLS + custom CA** — `EARSHOT_TLS_CLIENT_CERT` / `EARSHOT_TLS_CLIENT_KEY` present a
+  client certificate on every agent connection; `EARSHOT_TLS_CA` verifies the agent against a private
+  CA. One client identity per box (lws binds client TLS material at context level, applied to every
+  pooled context at init). (☐ per-stream *multi-identity* mTLS still needs context-partitioning.)
 
 ## Tier 3 — Scale & observability
 

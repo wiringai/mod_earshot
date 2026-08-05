@@ -5,6 +5,12 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 
 ## [Unreleased]
 
+### Added
+- **Box-level mutual TLS (mTLS) + custom CA** — `EARSHOT_TLS_CLIENT_CERT` / `EARSHOT_TLS_CLIENT_KEY`
+  present a client certificate on every agent connection; `EARSHOT_TLS_CA` verifies the agent against
+  a private CA instead of the system trust store. One client identity per box (libwebsockets binds
+  client TLS material at the context level; applied to every pooled context at init).
+
 ## [0.1.0] — 2026-08-05
 
 First public release. The transport, full-duplex audio path, and playout are validated

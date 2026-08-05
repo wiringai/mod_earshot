@@ -111,6 +111,20 @@ the `EARSHOT_SESSION_CONFIG` channel variable; otherwise Earshot sends an audio-
 | `EARSHOT_TLS_NO_HOSTNAME_CHECK` | skip wss cert/hostname checks (dev only) |
 | `earshot_ready` / `earshot_talking` / `earshot_masking` | **set by** Earshot for dialplan logic |
 
+## Box-level TLS (environment)
+
+Mutual TLS and custom-CA verification are configured **per box** (not per stream), via process
+environment variables read once at module load and applied to every agent connection:
+
+| Env var | Purpose |
+|---|---|
+| `EARSHOT_TLS_CLIENT_CERT` | PEM client certificate to present (enables mTLS) |
+| `EARSHOT_TLS_CLIENT_KEY` | matching private key (unencrypted PEM) |
+| `EARSHOT_TLS_CA` | verify the agent against this private CA **instead of** the system trust store — applies to **every** connection on the box, so public-CA endpoints (OpenAI, Deepgram) will fail; set only when all agents chain to this CA |
+
+One client identity per box — libwebsockets binds client TLS material at the shared-context level, so
+distinct per-stream certificates are not supported.
+
 ## Compatibility
 
 `uuid_audio_stream` / `audio_stream` accept mod_audio_stream's positional syntax
