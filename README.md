@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/earshot-social-preview.png" alt="Earshot — full-duplex call audio between FreeSWITCH and your AI agent, over one WebSocket" width="100%">
+  <img src="docs/assets/earshot-banner.png" alt="mod_earshot — full-duplex call audio between FreeSWITCH and your AI agent" width="100%">
 </p>
 
 # Earshot — `mod_earshot`
