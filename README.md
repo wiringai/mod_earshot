@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/earshot-icon-512.svg" alt="Earshot logo" width="120" height="120">
+</p>
+
 # Earshot — `mod_earshot`
 
 > A FreeSWITCH module that streams live call audio to your AI agent over a WebSocket —
