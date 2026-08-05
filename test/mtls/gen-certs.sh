@@ -27,6 +27,12 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout bogus-ca.key -out bogus-ca.pem
   -days "$DAYS" -subj "/CN=bogus-ca" 2>/dev/null
 
 rm -f server.csr client.csr ca.srl
+
+# The SAN is load-bearing (OpenSSL checks the host against the SAN, not the CN); fail loudly
+# if it didn't get applied, rather than shipping a server cert that fails case-1 verification.
+openssl x509 -in server.pem -noout -ext subjectAltName 2>/dev/null | grep -q "DNS:localhost" \
+  || { echo "ERROR: server.pem is missing subjectAltName=DNS:localhost" >&2; exit 1; }
+
 echo "Generated in $(pwd):"
 echo "  ca.pem                 trust anchor (EARSHOT_TLS_CA)"
 echo "  server.pem server.key  server identity (CN=localhost)"

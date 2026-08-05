@@ -494,6 +494,16 @@ static char *g_tls_client_key;    /* EARSHOT_TLS_CLIENT_KEY  — matching privat
 static char *g_tls_ca;            /* EARSHOT_TLS_CA          — verify server against this CA instead
                                    *                           of the system trust store           */
 
+/* A configured TLS file that isn't readable would make lws_create_context fail and take the
+ * whole pool (every stream, mTLS or not) down. Check first and drop unreadable material with a
+ * specific error, so the transport still comes up. */
+static int es_tls_readable(const char *var, const char *path)
+{
+    if (access(path, R_OK) == 0) return 1;
+    lwsl_err("earshot: %s=%s is not readable — ignoring this TLS material\n", var, path);
+    return 0;
+}
+
 static void es_tls_load_env(void)
 {
     const char *cert = getenv("EARSHOT_TLS_CLIENT_CERT");
@@ -501,16 +511,35 @@ static void es_tls_load_env(void)
     const char *ca   = getenv("EARSHOT_TLS_CA");
     int have_cert = cert && *cert, have_key = key && *key;
 
-    /* mTLS needs the cert+key as a pair; a half-config would either fail context creation
-     * opaquely or silently present no cert, so reject it loudly and skip both. */
+    /* mTLS needs the cert+key as a pair; a half-config would silently present no cert. */
     if (have_cert != have_key) {
         lwsl_err("earshot: mTLS needs BOTH EARSHOT_TLS_CLIENT_CERT and EARSHOT_TLS_CLIENT_KEY; "
                  "only one is set — presenting no client certificate\n");
         have_cert = have_key = 0;
     }
-    if (have_cert) g_tls_client_cert = strdup(cert);
-    if (have_key)  g_tls_client_key  = strdup(key);
-    if (ca && *ca) g_tls_ca          = strdup(ca);
+    /* Drop material we can't read (with a specific error) rather than failing the whole context.
+     * NOTE: a readable-but-invalid cert (mismatched pair, passphrase key) can still fail
+     * lws_create_context — configure mTLS on a box whose agents all use it. */
+    if (have_cert && (!es_tls_readable("EARSHOT_TLS_CLIENT_CERT", cert) ||
+                      !es_tls_readable("EARSHOT_TLS_CLIENT_KEY",  key)))
+        have_cert = have_key = 0;
+    if (ca && *ca && !es_tls_readable("EARSHOT_TLS_CA", ca))
+        ca = NULL;
+
+    if (have_cert) {                       /* allocate the pair together; never apply a half */
+        g_tls_client_cert = es_strdup(cert);
+        g_tls_client_key  = es_strdup(key);
+        if (!g_tls_client_cert || !g_tls_client_key) {
+            free(g_tls_client_cert); g_tls_client_cert = NULL;
+            free(g_tls_client_key);  g_tls_client_key  = NULL;
+        }
+    }
+    if (ca && *ca) g_tls_ca = es_strdup(ca);
+
+    /* Make the effective state visible so a mistyped/broken config isn't a silent no-mTLS. */
+    if (g_tls_client_cert || g_tls_ca)
+        lwsl_notice("earshot: box-level TLS active — client cert %s, custom CA %s\n",
+                    g_tls_client_cert ? "on" : "off", g_tls_ca ? "on" : "off");
 }
 
 static void es_tls_free_env(void)

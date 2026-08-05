@@ -3,7 +3,7 @@
 Goal: the reliable, protocol-flexible FreeSWITCH↔AI audio bridge. Tiers are ordered by
 adoption leverage, not difficulty; ☑ items ship in 0.1.0, ☐/◐ are what's next.
 
-Legend: ☐ todo · ◐ in progress · ☑ done
+Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
 
 ## Tier 0 — Foundation (make it real)
 
@@ -99,9 +99,11 @@ Legend: ☐ todo · ◐ in progress · ☑ done
 - ☑ App-level auth: full `Authorization` header (e.g. `Bearer <key>`, Deepgram `Token <key>`) via the
   `EARSHOT_AUTH` channel variable, sent verbatim on the WS handshake — validated live against OpenAI +
   Deepgram.
-- ☑ **Box-level mTLS + custom CA** — `EARSHOT_TLS_CLIENT_CERT` / `EARSHOT_TLS_CLIENT_KEY` present a
-  client certificate on every agent connection; `EARSHOT_TLS_CA` verifies the agent against a private
-  CA. One client identity per box (lws binds client TLS material at context level, applied to every
+- ◐ **Box-level mTLS + custom CA** (implemented; end-to-end validation pending) —
+  `EARSHOT_TLS_CLIENT_CERT` / `EARSHOT_TLS_CLIENT_KEY` present a client certificate on every agent
+  connection; `EARSHOT_TLS_CA` verifies the agent against a private CA — which **replaces the system
+  trust store box-wide**, so public-CA endpoints (OpenAI/Deepgram) then fail unless they also chain to
+  it. One client identity per box (lws binds client TLS material at context level, applied to every
   pooled context at init). (☐ per-stream *multi-identity* mTLS still needs context-partitioning.)
 - ✗ **permessage-deflate** — considered and deliberately omitted. `mod_audio_stream` enables WebSocket
   compression by default; earshot does not, because the payload is real-time audio: G.711/L16 frames

@@ -17,7 +17,7 @@ ctx.load_cert_chain(HERE / "server.pem", HERE / "server.key")
 ctx.load_verify_locations(HERE / "ca.pem")
 ctx.verify_mode = ssl.CERT_REQUIRED          # require a client cert => mTLS
 
-async def echo(ws):
+async def echo(ws, *args):                    # *args: tolerate the 2-arg (ws, path) handler on websockets<11
     print("client connected (mTLS handshake passed)")
     async for msg in ws:                      # bounce audio straight back
         await ws.send(msg)

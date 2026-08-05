@@ -3,33 +3,43 @@
 Verifies box-level mutual TLS and custom-CA verification
 (`EARSHOT_TLS_CLIENT_CERT`, `EARSHOT_TLS_CLIENT_KEY`, `EARSHOT_TLS_CA`).
 
-> **These are process environment variables, not channel variables.** They are read
-> **once at module load** (the WS context pool is built then), so set them where
-> FreeSWITCH is launched — systemd `EnvironmentFile`, a wrapper script, or the shell —
-> then `fs_cli -x "reload mod_earshot"`. Setting them in the dialplan with `set` will
-> **not** work.
+> **These are process environment variables, not channel variables.** `mod_earshot` reads them
+> with `getenv()` when its WebSocket pool is built at module load, and a running process's
+> environment is fixed at launch — so **each test case below needs FreeSWITCH (re)started with
+> that case's environment.** A `set` in the dialplan, or a bare `reload mod_earshot` (same process
+> env), will **not** change them. Provide them via systemd `EnvironmentFile`, a wrapper script, or
+> the launching shell.
+
+> **Do not set `insecure` / `EARSHOT_TLS_NO_HOSTNAME_CHECK` for these tests.** It skips server-cert
+> verification, which would make case 3 (bogus CA) connect anyway and silently pass.
 
 ## 1. Set up the server
 
 ```bash
 cd test/mtls
-./gen-certs.sh                 # -> ca.pem, server.*, client.*, bogus-ca.pem (all gitignored)
-pip install websockets
-python3 mtls_echo_server.py    # wss://localhost:9443/ , requires a client cert
+./gen-certs.sh                    # -> ca.pem, server.*, client.*, bogus-ca.pem (all gitignored)
+pip install 'websockets>=11'      # <11 uses a 2-arg handler and would false-fail case 1
+python3 mtls_echo_server.py       # wss://localhost:9443/ , requires a client cert
 ```
 
 ## 2. Point earshot at it
 
-Launch FreeSWITCH with the client identity in its environment, e.g.:
+(Re)start FreeSWITCH with the client identity in its environment:
 
 ```bash
 EARSHOT_TLS_CLIENT_CERT="$PWD/client.pem" \
 EARSHOT_TLS_CLIENT_KEY="$PWD/client.key" \
 EARSHOT_TLS_CA="$PWD/ca.pem" \
-  freeswitch -nonat        # (or your systemd unit's EnvironmentFile)
+  freeswitch -nonat               # (or put these in your systemd unit's EnvironmentFile)
 ```
 
-Dialplan (no TLS options needed on the app line — the identity is box-level):
+On startup the FS log should show the effective state — confirm it before dialing:
+
+```
+earshot: box-level TLS active — client cert on, custom CA on
+```
+
+Dialplan (no TLS options on the app line — the identity is box-level; do **not** add `insecure`):
 
 ```xml
 <action application="answer"/>
@@ -37,18 +47,24 @@ Dialplan (no TLS options needed on the app line — the identity is box-level):
 <action application="playback" data="silence_stream://-1"/>
 ```
 
-Call the extension and talk — you should hear yourself echoed back, and the server
-prints `client connected (mTLS handshake passed)`.
+Call the extension and talk — you should hear yourself echoed back, and the server prints
+`client connected (mTLS handshake passed)`.
 
 ## 3. Test matrix
 
-| # | Change | Expected result | Proves |
-|---|--------|-----------------|--------|
-| 1 | all three vars set | echo works; server prints "client connected" | mTLS + custom-CA succeed |
-| 2 | unset `EARSHOT_TLS_CLIENT_CERT` + `_KEY` | connection fails; server never prints "client connected" | server-required client cert is enforced (earshot presents none) |
-| 3 | `EARSHOT_TLS_CA=$PWD/bogus-ca.pem` | connection fails (server cert not trusted) | the CA field is actually honored, not ignored |
-| 4 | set only `EARSHOT_TLS_CLIENT_CERT` (no `_KEY`) | `lwsl_err` in the FS log; no cert presented; server rejects | the both-or-neither guard fires |
+Each row is a **full environment**. Restart FreeSWITCH with exactly the vars shown, then dial.
+(Keep cert+key set for case 3 — that's what makes it test the *CA*, not a missing client cert.)
 
-**Regression:** with **none** of the vars set, a normal `wss://` call to a public
-vendor (OpenAI Realtime / Deepgram) must still connect — box-level TLS is fully
+| # | Restart FS with this env | Expected | Proves |
+|---|---|---|---|
+| 1 | `CERT=client.pem` · `KEY=client.key` · `CA=ca.pem` | echo works; server prints "client connected" | mTLS + custom-CA succeed |
+| 2 | `CA=ca.pem`; **CERT/KEY unset** | connect fails; server never prints "client connected" | the server-required client cert is enforced (earshot presents none) |
+| 3 | `CERT=client.pem` · `KEY=client.key` · **`CA=bogus-ca.pem`** | connect fails (server cert not trusted) | the CA is honored — cert+key stay set, so the failure is CA-only |
+| 4 | **`CERT=client.pem` only** (KEY unset) | `lwsl_err` in the FS log; no cert presented; server rejects | the both-or-neither guard fires |
+
+(`CERT`/`KEY`/`CA` above are the `EARSHOT_TLS_CLIENT_CERT` / `EARSHOT_TLS_CLIENT_KEY` /
+`EARSHOT_TLS_CA` vars, pointed at the files from `gen-certs.sh`.)
+
+**Regression:** with **none** of the vars set (restart FS with a clean env), a normal `wss://`
+call to a public vendor (OpenAI Realtime / Deepgram) must still connect — box-level TLS is fully
 opt-in and the default path is unchanged.

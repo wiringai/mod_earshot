@@ -248,9 +248,11 @@ played back while the forks did not; stopping one fork left the others running.
 - `wss://` (TLS) with server-cert verification against the system trust store; optional
   `auth=<token>` → `Authorization` header (use the `EARSHOT_AUTH` channel var for a value with a
   space, e.g. `Bearer <key>` — the option list is split on spaces).
-- **Box-level mTLS + custom CA** — `EARSHOT_TLS_CLIENT_CERT` + `EARSHOT_TLS_CLIENT_KEY` present a
-  client certificate on every agent connection; `EARSHOT_TLS_CA` verifies the agent against a private
-  CA. One client identity per box (unencrypted-PEM key).
+- **Box-level mTLS + custom CA** *(implemented; end-to-end validation pending)* —
+  `EARSHOT_TLS_CLIENT_CERT` + `EARSHOT_TLS_CLIENT_KEY` present a client certificate on every agent
+  connection; `EARSHOT_TLS_CA` verifies the agent against a private CA — note it **replaces the system
+  trust store box-wide**, so don't set it on a box that also talks to public-CA vendors. One client
+  identity per box (unencrypted-PEM key).
 - Control channel is **opt-in** (`commands=true`) and whitelisted to call-control APIs only.
 - **PCI/PII masking** shipped (§8): mute audio + redact DTMF to the agent during card entry.
 - ☐ Planned: per-stream (multi-identity) mTLS, per-action command scoping, OAuth refresh, consent-gated recording.
