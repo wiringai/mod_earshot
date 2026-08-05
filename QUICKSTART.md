@@ -43,13 +43,16 @@ Your OpenAI Realtime agent works unmodified — Earshot speaks its wire protocol
 `input_audio_buffer.append`, `response.output_audio.delta`) and negotiates the `realtime` subprotocol.
 
 ```xml
+<action application="set" data="EARSHOT_AUTH=Bearer sk-..."/>
 <action application="set" data="EARSHOT_SESSION_CONFIG={"type":"session.update","session":{"instructions":"You are a helpful receptionist.","input_audio_format":"g711_ulaw","output_audio_format":"g711_ulaw","turn_detection":{"type":"server_vad"}}}"/>
 <action application="answer"/>
-<action application="earshot" data="start wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview proto=openai auth=Bearer sk-... commands=true"/>
+<action application="earshot" data="start wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview proto=openai commands=true"/>
 <action application="playback" data="silence_stream://-1"/>
 ```
 
-- `auth=Bearer sk-...` becomes the `Authorization` header.
+- `EARSHOT_AUTH` (a channel var) becomes the `Authorization` header. Use it — not the `auth=`
+  option — for any value with a space (`Bearer <key>`, `Token <key>`): the option list is split on
+  spaces, so `auth=Bearer sk-...` would truncate to `Bearer`.
 - `EARSHOT_SESSION_CONFIG` (a channel var) is sent verbatim as the first message — put your
   instructions/voice there. Omit it and Earshot sends a sane g711 + server-VAD default.
 - Set `codec=l16 rate=24000` instead for OpenAI `pcm16` (Earshot resamples from the 8 kHz channel).
@@ -57,8 +60,9 @@ Your OpenAI Realtime agent works unmodified — Earshot speaks its wire protocol
 ## 3. Deepgram Voice Agent
 
 ```xml
+<action application="set" data="EARSHOT_AUTH=Token dg-..."/>
 <action application="answer"/>
-<action application="earshot" data="start wss://agent.deepgram.com/v1/agent/converse proto=deepgram auth=Token dg-..."/>
+<action application="earshot" data="start wss://agent.deepgram.com/v1/agent/converse proto=deepgram"/>
 <action application="playback" data="silence_stream://-1"/>
 ```
 
@@ -86,7 +90,8 @@ are `dir=in` (read-only — they never fight the agent for playback).
 ```xml
 <action application="answer"/>
 <action application="earshot" data="start ws://agent/ws proto=native"/>
-<action application="earshot" data="start wss://api.deepgram.com/v1/listen id=transcribe dir=in proto=deepgram auth=Token dg-..."/>
+<action application="set" data="EARSHOT_AUTH=Token dg-..."/>
+<action application="earshot" data="start wss://api.deepgram.com/v1/listen id=transcribe dir=in proto=deepgram"/>
 <action application="earshot" data="start ws://supervisor/ws id=supervisor dir=in"/>
 <action application="playback" data="silence_stream://-1"/>
 ```

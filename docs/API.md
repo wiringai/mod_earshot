@@ -29,9 +29,8 @@ Begin streaming the channel's audio to `url` (`ws://` or `wss://`).
 | `mask` | `on` | off | start in a PCI masking window (mute audio + redact DTMF to the agent) |
 | `commands` | `true` | false | **opt-in** control channel (agent can drive the call) |
 | `metrics` | `<seconds>` | `0` | emit `earshot::metrics` every N seconds |
-| `jitter` | `drop` `block` | `drop` | outbound backpressure policy |
 | `corr` | `auto` \| `<id>` | `auto` | correlation id; `auto` = SIP Call-ID |
-| `auth` | `Bearer <t>` \| `Token <t>` \| … | — | sent verbatim as `Authorization` on the handshake |
+| `auth` | `<token>` (no spaces) | — | `Authorization` header. A value **containing a space** (`Bearer <key>`, `Token <key>`) must be passed via the **`EARSHOT_AUTH`** channel variable instead — the option list is split on spaces, so `auth=Bearer …` would truncate to `Bearer` |
 
 ### `stop` · `pause` · `resume`
 Tear down / suspend / resume the stream. Channel hangup also tears down cleanly.
