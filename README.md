@@ -155,6 +155,25 @@ The portable core (codec, protobuf) unit-tests without FreeSWITCH, so CI stays
 green on any runner; the module itself compiles where FS dev headers are available. See
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
+## Commercial support & consulting
+
+Earshot is MIT and free to run. If you're taking it — or FreeSWITCH voice-AI generally — to
+production, the author (**xpertvoip**) offers paid help:
+
+- **Integration & POC** — a working phone-call → AI-agent bridge on your stack, live in weeks,
+  against the vendor of your choice (OpenAI, Deepgram, Pipecat, or your own WebSocket agent).
+- **Bridging your SIP infrastructure to AI voice** — connect an existing FreeSWITCH / SIP carrier
+  setup to real-time voice agents cleanly, with correlation, barge-in, and PCI-safe DTMF.
+- **Scaling to millions of calls a day** — take a FreeSWITCH + AI-voice deployment horizontal:
+  the shared-event-loop transport, fleet architecture, capacity planning, and latency/quality
+  tuning so voice agents scale out under real load.
+- **Production support & retainers** — on-call, upgrades, and SLA-backed help for teams running
+  earshot or a FreeSWITCH voice-AI platform.
+- **Training & workshops** — "Production Voice-AI on FreeSWITCH" for your team.
+
+📧 **[varunmacid@gmail.com](mailto:varunmacid@gmail.com)** — tell me your stack and what you're
+building. *(A dedicated services page is on the way.)*
+
 ## Naming
 
 `Earshot` / `mod_earshot` is a working name (evokes "within earshot"). It's a single token across the
