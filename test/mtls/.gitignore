@@ -1,0 +1,5 @@
+# generated test certs/keys — never commit private key material
+*.pem
+*.key
+*.csr
+*.srl
