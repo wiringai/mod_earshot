@@ -39,7 +39,7 @@ service, or — for the self-hosted Pipecat wire format — its official protobu
 | Agent / protocol             | `proto=`     | Status               |
 |------------------------------|--------------|----------------------|
 | OpenAI Realtime              | `openai`     | ✅ live-validated    |
-| Deepgram Voice Agent         | `deepgram`   | ✅ live-validated (SIP phone) |
+| Deepgram Voice Agent         | `deepgram`   | ✅ live-validated    |
 | Native (any WebSocket)       | `native`     | ✅ live-validated    |
 | Pipecat                      | `pipecat`    | ✅ validated (protobuf) |
 | ElevenLabs Conversational AI | `elevenlabs` | adapter ✓            |

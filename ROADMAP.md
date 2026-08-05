@@ -57,8 +57,8 @@ Legend: ☐ todo · ◐ in progress · ☑ done
 
 - ☑ **Protocol adapters** (`es_proto.c`): `native`, `twilio`, `openai`, `deepgram`, `elevenlabs`,
   `gemini`, `pipecat` — an agent written for any of these works against Earshot unmodified.
-  - **`openai` and `deepgram` are live-validated against the real vendors** on real SIP calls
-    (Deepgram from a hardware SIP phone); `native`, `twilio`, and `pipecat` are validated by full-duplex
+  - **`openai` and `deepgram` are live-validated against the real vendors** on real SIP calls;
+    `native`, `twilio`, and `pipecat` are validated by full-duplex
     round-trip against a local echo agent; `elevenlabs` and `gemini` are implemented but not yet
     live-validated (see the README status table). Framing detail per adapter:
     - `twilio`: `connected`+`start` framing, base64 μ-law media both ways, **mark echo-on-drain**.
