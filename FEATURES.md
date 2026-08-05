@@ -248,7 +248,7 @@ played back while the forks did not; stopping one fork left the others running.
 - `wss://` (TLS) with server-cert verification against the system trust store; optional
   `auth=<token>` → `Authorization` header (use the `EARSHOT_AUTH` channel var for a value with a
   space, e.g. `Bearer <key>` — the option list is split on spaces).
-- **Box-level mTLS + custom CA** *(implemented; end-to-end validation pending)* —
+- **Box-level mTLS + custom CA** ✓ *(validated end-to-end on a real SIP call)* —
   `EARSHOT_TLS_CLIENT_CERT` + `EARSHOT_TLS_CLIENT_KEY` present a client certificate on every agent
   connection; `EARSHOT_TLS_CA` verifies the agent against a private CA — note it **replaces the system
   trust store box-wide**, so don't set it on a box that also talks to public-CA vendors. One client

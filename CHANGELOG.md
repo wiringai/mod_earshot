@@ -11,7 +11,8 @@ All notable changes to Earshot (`mod_earshot`). Format follows
   a private CA instead of the system trust store (**box-wide** — public-CA endpoints then fail unless
   they also chain to it). One client identity per box (libwebsockets binds client TLS material at the
   context level; applied to every pooled context at init). Configured via process environment, read
-  at module load; the client key must be an unencrypted PEM.
+  at module load; the client key must be an unencrypted PEM. Validated end-to-end on a real SIP call
+  (FreeSWITCH 1.11.1, libwebsockets 4.0.20) with live audio over the mutually-authenticated wss leg.
 
 ## [0.1.0] — 2026-08-05
 

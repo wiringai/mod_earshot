@@ -99,7 +99,9 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
 - ☑ App-level auth: full `Authorization` header (e.g. `Bearer <key>`, Deepgram `Token <key>`) via the
   `EARSHOT_AUTH` channel variable, sent verbatim on the WS handshake — validated live against OpenAI +
   Deepgram.
-- ◐ **Box-level mTLS + custom CA** (implemented; end-to-end validation pending) —
+- ☑ **Box-level mTLS + custom CA** — **VALIDATED end-to-end on a real SIP call** (FreeSWITCH 1.11.1,
+  libwebsockets 4.0.20): client cert presented + accepted, `EARSHOT_TLS_CA` enforced, live audio over
+  the mutually-authenticated wss leg; also standalone-verified across all guard cases.
   `EARSHOT_TLS_CLIENT_CERT` / `EARSHOT_TLS_CLIENT_KEY` present a client certificate on every agent
   connection; `EARSHOT_TLS_CA` verifies the agent against a private CA — which **replaces the system
   trust store box-wide**, so public-CA endpoints (OpenAI/Deepgram) then fail unless they also chain to
