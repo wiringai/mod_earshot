@@ -13,10 +13,11 @@
 
 ## Why Earshot
 
-Every FreeSWITCH voice-AI write-up hits the same wall: the incumbent module's **playback**
-(agent → caller) doesn't work reliably, forcing `uuid_broadcast` hacks. Earshot's `WRITE_REPLACE`
-path is validated with real audio, full duplex, on one leg. That's the wedge — everything else builds
-on it. The full pitch is in **[WHY.md](WHY.md)**; the complete capability list is in **[FEATURES.md](FEATURES.md)**.
+Every FreeSWITCH voice-AI write-up hits the same wall: the incumbent module (`mod_audio_stream`) has
+**playback** (agent → caller) that doesn't work reliably, forcing `uuid_broadcast` hacks. Earshot is a
+drop-in **`mod_audio_stream` alternative** whose `WRITE_REPLACE` path is validated with real audio, full
+duplex, on one leg. That's the wedge — everything else builds on it. The full pitch is in
+**[WHY.md](WHY.md)**; the complete capability list is in **[FEATURES.md](FEATURES.md)**.
 
 - **7 wire protocols, agent unmodified** — `native`, `twilio`, `openai` (Realtime),
   `deepgram` (Voice Agent), `elevenlabs`, `gemini` (Live), `pipecat`. Swap vendors with one word.
