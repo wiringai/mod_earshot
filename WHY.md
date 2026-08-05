@@ -4,8 +4,10 @@ Earshot is the reliable, protocol-flexible FreeSWITCH ↔ AI-agent audio bridge.
 version of what makes it different from the alternatives — the pitch for the open-source launch.
 (For the full capability list see [FEATURES.md](FEATURES.md); for what's next, [ROADMAP.md](ROADMAP.md).)
 
-Everything below is implemented and **validated on real SIP calls** (`sipp` + real audio), unless
-marked otherwise.
+The core call path below is **validated on real SIP calls** (`sipp` + real audio). Protocol adapters
+vary by vendor: `native`, `openai`, `deepgram`, and `pipecat` are validated against the live
+service/schema; `elevenlabs` and `gemini` ship adapter-complete and mock-tested in CI (see the status
+table in [README](README.md)).
 
 ---
 
@@ -56,7 +58,7 @@ workarounds. Earshot's `WRITE_REPLACE` path is validated with real audio, full d
     `mod_audio_stream` dialplans unmodified (and refuses to register if that module is still loaded).
 
 11. **MIT, tested, uncapped.** Portable core (codec, protobuf, backpressure queue) is **unit-tested**
-    off-box — including adversarial protobuf input caught in peer review — and every feature is
+    off-box — including adversarial protobuf input caught in peer review — and the core call path is
     exercised end-to-end with `sipp` + real audio.
 
 ## What Earshot is *not*

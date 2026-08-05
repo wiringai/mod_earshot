@@ -5,8 +5,12 @@ bridge: it taps a channel's audio, streams it to an agent over a WebSocket, and 
 agent's audio back to the caller — full duplex, on one leg, with the reliability the stock
 tooling never delivered.
 
-> Status legend: **✓ shipped & validated on real SIP calls** · ◐ partial · ☐ planned
-> Every ✓ below has been exercised end-to-end on real SIP calls with `sipp` + real audio.
+> Status legend: **✓ shipped** · ◐ partial · ☐ planned
+> The core call path — full-duplex audio, VAD/turn-taking, barge-in, DTMF/PCI masking, fan-out, and
+> the control channel — is validated end-to-end on real SIP calls (`sipp` + real audio). Protocol
+> adapters vary by vendor: `native`, `openai`, `deepgram`, and `pipecat` are validated against the
+> live service/schema; `twilio` is framing/echo-tested; `elevenlabs` and `gemini` are adapter-complete
+> and mock-tested in CI (not yet run against the live vendor). See the table in [README](README.md).
 
 ---
 
@@ -197,8 +201,7 @@ start ... metrics=10          # emit earshot::metrics every 10s
 - Single clean teardown path; no crash if the agent hangs up first.
 
 ```
-start ... jitter=drop         # backpressure policy
-EARSHOT_NO_RECONNECT=true     # channel var to disable auto-reconnect
+EARSHOT_NO_RECONNECT=true     # channel var to disable auto-reconnect (backpressure is automatic drop-oldest)
 ```
 
 ## 11. Correlation-first  ✓
@@ -242,10 +245,12 @@ played back while the forks did not; stopping one fork left the others running.
 
 ## 14. Security  ◐
 
-- `wss://` (TLS); optional `auth=<token>` → `Authorization` header; mTLS client-cert fields in place.
+- `wss://` (TLS) with server-cert verification against the system trust store; optional
+  `auth=<token>` → `Authorization` header (use the `EARSHOT_AUTH` channel var for a value with a
+  space, e.g. `Bearer <key>` — the option list is split on spaces).
 - Control channel is **opt-in** (`commands=true`) and whitelisted to call-control APIs only.
 - **PCI/PII masking** shipped (§8): mute audio + redact DTMF to the agent during card entry.
-- ☐ Planned: per-action command scoping, OAuth refresh, consent-gated recording.
+- ☐ Planned: mTLS / custom-CA client certs, per-action command scoping, OAuth refresh, consent-gated recording.
 
 ---
 
@@ -255,13 +260,14 @@ played back while the forks did not; stopping one fork left the others running.
 · `proto=native|twilio|openai|deepgram|elevenlabs|gemini|pipecat`
 · `ready=firstframe|connect|manual` · `vad=on` · `vad_barge=on` · `vad_notify=on`
 · `vad_mode=-1..3` · `vad_voice_ms=<n>` · `vad_silence_ms=<n>` · `dtmf=on` · `mask=on` · `commands=true`
-· `metrics=<seconds>` · `jitter=drop|block` · `corr=auto|<id>` · `auth=<token>` · `buffer_ms=<n>`
+· `metrics=<seconds>` · `corr=auto|<id>` · `auth=<token>` (or the `EARSHOT_AUTH` var for a value with a space)
 
 **Verbs** (all accept an optional `id=<name>` after the verb to target a fan-out stream):
 `start` · `stop` · `pause` · `resume` · `flush` · `send <text>` · `mask on|off` · `status` · `metrics`
 
-**Channel variables**: `EARSHOT_SESSION_CONFIG` (openai/deepgram) · `EARSHOT_NO_RECONNECT`
-· `EARSHOT_TLS_NO_HOSTNAME_CHECK` · (set by earshot) `earshot_ready` · `earshot_talking` · `earshot_masking`
+**Channel variables**: `EARSHOT_SESSION_CONFIG` (openai/deepgram/gemini/elevenlabs) · `EARSHOT_AUTH`
+· `EARSHOT_NO_RECONNECT` · `EARSHOT_TLS_NO_HOSTNAME_CHECK` · (set by earshot) `earshot_ready`
+· `earshot_talking` · `earshot_masking`
 
 **Events**: `earshot::connected` · `earshot::ready` · `earshot::metrics` · `earshot::command` · `earshot::dtmf`
 · `earshot::speech_started` · `earshot::speech_stopped`
