@@ -34,6 +34,8 @@
 #define ES_TURN_STOP  "{\"type\":\"speech_stopped\"}"
 #define ES_PLAY_BUF_MAX (2 * 1024 * 1024)  /* play-buffer cap: must fit a full burst-delivered
                                             * agent response (see es_sink_audio) */
+#define ES_GREETING_MAX_MS 15000           /* welcome-greeting file is loaded up to this length */
+#define ES_META_MAX 1024                   /* max EARSHOT_META bytes put on the handshake header */
 
 #define EARSHOT_BUG_NAME           "earshot"
 
@@ -46,6 +48,7 @@
     "\t\t[interruptible=none|dtmf|speech|any] [ignore_backchannel=on] [sensitivity=low|medium|high]\n" \
     "\t\t[barge_min_ms=<n>] [barge_fade_ms=<n>]\n" \
     "\t\t[dtmf=on] [mask=on] [commands=true] [metrics=<seconds>] [corr=auto|<id>] [auth=<token> | EARSHOT_AUTH var]\n" \
+    "\t\t[greeting=<file> | EARSHOT_GREETING var]  (caller context: EARSHOT_META -> X-Earshot-Meta header)\n" \
     "\t  control channel (commands=true): agent sends {\"type\":\"command\",\"action\":...}\n" \
     "\t  actions: transfer|hangup|send_dtmf|play|stop_play|record|setvar|hold|bridge|park\n" \
     "<uuid> stop\n" \
@@ -129,6 +132,13 @@ typedef struct {
     switch_buffer_t *play_buf;      /* agent audio (decoded L16) awaiting playback */
     switch_mutex_t  *play_mutex;    /* guards play_buf: es_ws thread writes, media thread reads */
     switch_queue_t  *marks;         /* pending Twilio marks to echo once playback drains */
+
+    /* welcome greeting: a file preloaded at channel rate, dropped into the playout the moment
+     * the ready-gate opens so it leads the agent's first words (see the ready-announce block) */
+    char             greeting_path[256];    /* greeting audio file (greeting= / EARSHOT_GREETING) */
+    int16_t         *greeting_pcm;          /* preloaded greeting, L16 mono @ chan_rate (pool-owned) */
+    size_t           greeting_samples;      /* samples in greeting_pcm (0 = no greeting) */
+    switch_bool_t    greeting_done;         /* already injected into play_buf */
 
     /* metrics counters (tx = media thread; rx/drops = ws thread; racy reads are fine for stats) */
     uint64_t         tx_frames, tx_bytes;   /* caller -> agent */
@@ -334,10 +344,54 @@ static switch_bool_t es_apply_option(es_stream_t *st, const char *kv)
         switch_copy_string(st->corr, val, sizeof st->corr);
     } else if (!strcasecmp(key, "auth")) {
         switch_copy_string(st->auth, val, sizeof st->auth);
+    } else if (!strcasecmp(key, "greeting")) {
+        switch_copy_string(st->greeting_path, val, sizeof st->greeting_path);  /* path w/o spaces; else EARSHOT_GREETING */
     } else {
         return SWITCH_FALSE;
     }
     return SWITCH_TRUE;
+}
+
+/* Preload the welcome-greeting file into a channel-rate L16 mono buffer (pool-owned), so the
+ * ready-announce block can drop it into the playout without any file I/O on the media thread.
+ * The core file layer resamples to chan_rate for us. Bounded by ES_GREETING_MAX_MS; any error
+ * just leaves greeting_samples == 0 and the greeting is skipped. */
+static void es_greeting_load(es_stream_t *st, switch_memory_pool_t *pool, const char *path, int rate)
+{
+    switch_file_handle_t fh = { 0 };
+    size_t cap, n = 0;
+    int16_t *buf;
+    if (!path || !path[0] || rate <= 0) return;
+    if (switch_core_file_open(&fh, path, 1, (uint32_t) rate,
+            SWITCH_FILE_FLAG_READ | SWITCH_FILE_DATA_SHORT, pool) != SWITCH_STATUS_SUCCESS) {
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+            "earshot: greeting '%s' could not be opened; continuing without it\n", path);
+        return;
+    }
+    cap = (size_t) rate * ES_GREETING_MAX_MS / 1000;          /* sample cap (mono) */
+    buf = switch_core_alloc(pool, cap * sizeof(int16_t));
+    while (buf && n < cap) {
+        switch_size_t got = cap - n;                          /* samples to read this pass */
+        if (switch_core_file_read(&fh, buf + n, &got) != SWITCH_STATUS_SUCCESS || got == 0) break;
+        n += got;
+    }
+    switch_core_file_close(&fh);
+    if (buf && n) { st->greeting_pcm = buf; st->greeting_samples = n; }
+}
+
+/* Drop the welcome greeting into the playout exactly once, ahead of any agent audio. Called from
+ * whichever thread opens the ready-gate — the WS thread on the first agent frame (before that
+ * frame is written) or the media thread at ready-announce (if the agent is still silent) — so the
+ * greeting always leads regardless of ready= mode. play_mutex + greeting_done keep it once. */
+static void es_greeting_emit(es_stream_t *st)
+{
+    if (!st->greeting_pcm || !st->play_buf) return;
+    switch_mutex_lock(st->play_mutex);
+    if (!st->greeting_done) {
+        switch_buffer_write(st->play_buf, st->greeting_pcm, st->greeting_samples * 2);
+        st->greeting_done = SWITCH_TRUE;
+    }
+    switch_mutex_unlock(st->play_mutex);
 }
 
 /* ---- protocol sink: decoded inbound messages land here (es_ws thread) --- */
@@ -364,6 +418,7 @@ static void es_sink_audio(void *user, const int16_t *pcm, size_t nsamples)
         else return;                       /* manual/connect not yet ready -> drop */
     }
     if (!st->play_buf) return;
+    es_greeting_emit(st);                  /* greeting leads: emitted before this first agent audio */
     switch_mutex_lock(st->play_mutex);
     /* The cap must hold an ENTIRE agent response, not just a jitter cushion: realtime
      * vendors (OpenAI GA especially) deliver a full answer several times faster than
@@ -558,6 +613,7 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
         if (st->ready && !st->ready_announced) {
             switch_core_session_t *s = switch_core_media_bug_get_session(bug);
             st->ready_announced = SWITCH_TRUE;
+            es_greeting_emit(st);   /* covers the agent-still-silent case; no-op if already emitted */
             if (s) {
                 switch_channel_set_variable(switch_core_session_get_channel(s), "earshot_ready", "true");
                 es_fire_event(s, EARSHOT_EVENT_READY, "corr", st->corr);
@@ -697,6 +753,15 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
             && read_impl.actual_samples_per_second)
             chan_rate = read_impl.actual_samples_per_second;
         st->chan_rate = chan_rate;                     /* for the barge fade-out ramp */
+        /* preload the welcome greeting at the channel rate — playback-capable streams only
+         * (read-only dir=in forks never play out). Option path first, else EARSHOT_GREETING. */
+        if (st->bug_flags & SMBF_WRITE_REPLACE) {
+            if (!st->greeting_path[0]) {
+                const char *g = switch_channel_get_variable(channel, "EARSHOT_GREETING");
+                if (g) switch_copy_string(st->greeting_path, g, sizeof st->greeting_path);
+            }
+            if (st->greeting_path[0]) es_greeting_load(st, pool, st->greeting_path, chan_rate);
+        }
         st->proto_ctx = es_proto_create(st->proto, st->codec, st->rate, chan_rate, st->corr,
                                         switch_core_session_get_uuid(session),
                                         switch_channel_get_variable(channel, "EARSHOT_SESSION_CONFIG"));
@@ -745,6 +810,21 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
         o.hdr_call_id      = st->corr;
         o.hdr_channel_uuid = switch_core_session_get_uuid(session);
         o.hdr_correlation  = st->corr;
+        {   /* opaque caller context -> X-Earshot-Meta. Truncate at any CR/LF (so a value sourced
+             * from caller-influenced data can't inject extra handshake headers) and cap the length
+             * (an oversized header would overflow the lws handshake buffer and abort the connect). */
+            const char *m = switch_channel_get_variable(channel, "EARSHOT_META");
+            if (m && *m) {
+                char *ms = switch_core_session_strdup(session, m), *c;
+                for (c = ms; *c; c++) if (*c == '\r' || *c == '\n') { *c = '\0'; break; }
+                if (c - ms > ES_META_MAX) {
+                    ms[ES_META_MAX] = '\0';
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                        "earshot: EARSHOT_META truncated to %d bytes for the handshake header\n", ES_META_MAX);
+                }
+                o.hdr_meta = ms;
+            }
+        }
         o.hdr_extra_name   = es_proto_extra_header_name(st->proto);   /* optional per-proto header (currently none) */
         o.hdr_extra_value  = es_proto_extra_header_value(st->proto);
         o.subprotocol      = es_proto_subprotocol(st->proto);         /* e.g. openai -> "realtime" */
