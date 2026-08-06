@@ -82,6 +82,10 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
   `error:disabled` when the gate is off. ☐ next: per-action scoping (`commands=transfer,hangup`).
 - ☑ **Correlation-first handshake**: `X-Call-ID`/`X-Channel-UUID`/`X-Correlation-ID` headers on the
   WS handshake, and (Twilio) `earshot_call_id`+`earshot_channel_uuid` in `start.customParameters`.
+- ☑ **Caller context + welcome greeting**: `EARSHOT_META` → `X-Earshot-Meta` handshake header (opaque
+  per-call context to the agent at connect, any `proto`); `greeting=<file>` / `EARSHOT_GREETING` plays
+  a fixed audio prompt into the channel the moment the ready gate opens, ahead of the agent's first
+  words. (☐ dynamic/TTS greeting stays the agent's job or a pre-rendered file.)
 - ☑ **Module-side VAD + turn events** (works with any agent): FS-native `switch_vad` on the caller
   audio emits `earshot::speech_started` / `earshot::speech_stopped` + sets `earshot_talking`, with
   opt-in **speech-triggered barge-in** (`vad_barge=on`, flush playback the instant the caller speaks)

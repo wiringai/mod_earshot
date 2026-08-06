@@ -182,6 +182,7 @@ static void es_free_full(es_ws_t *w)
     free((void *) w->o.hdr_call_id);
     free((void *) w->o.hdr_channel_uuid);
     free((void *) w->o.hdr_correlation);
+    free((void *) w->o.hdr_meta);
     free((void *) w->o.hdr_extra_name);
     free((void *) w->o.hdr_extra_value);
     free((void *) w->o.subprotocol);
@@ -211,6 +212,9 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
         if (w->o.hdr_correlation)
             rc |= lws_add_http_header_by_name(wsi, (const unsigned char *)"X-Correlation-ID:",
                 (const unsigned char *)w->o.hdr_correlation, (int)strlen(w->o.hdr_correlation), p, end);
+        if (w->o.hdr_meta)
+            rc |= lws_add_http_header_by_name(wsi, (const unsigned char *)"X-Earshot-Meta:",
+                (const unsigned char *)w->o.hdr_meta, (int)strlen(w->o.hdr_meta), p, end);
         if (w->o.hdr_extra_name && w->o.hdr_extra_value)
             rc |= lws_add_http_header_by_name(wsi, (const unsigned char *)w->o.hdr_extra_name,
                 (const unsigned char *)w->o.hdr_extra_value, (int)strlen(w->o.hdr_extra_value), p, end);
@@ -647,6 +651,7 @@ es_ws_t *es_ws_create(const es_ws_opts_t *opts)
     w->o.hdr_call_id      = es_strdup(opts->hdr_call_id);
     w->o.hdr_channel_uuid = es_strdup(opts->hdr_channel_uuid);
     w->o.hdr_correlation  = es_strdup(opts->hdr_correlation);
+    w->o.hdr_meta         = es_strdup(opts->hdr_meta);
     w->o.hdr_extra_name   = es_strdup(opts->hdr_extra_name);
     w->o.hdr_extra_value  = es_strdup(opts->hdr_extra_value);
     w->o.subprotocol      = es_strdup(opts->subprotocol);

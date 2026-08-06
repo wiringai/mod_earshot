@@ -41,6 +41,7 @@ typedef struct {
     const char        *hdr_call_id;      /* -> X-Call-ID */
     const char        *hdr_channel_uuid; /* -> X-Channel-UUID */
     const char        *hdr_correlation;  /* -> X-Correlation-ID */
+    const char        *hdr_meta;         /* -> X-Earshot-Meta (opaque caller context, may be NULL) */
     /* optional single protocol-specific handshake header (currently unused; extension point).
      * When set, the name includes the trailing ':'. */
     const char        *hdr_extra_name;
