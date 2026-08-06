@@ -256,10 +256,11 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
         }
         if (final) {
             if (!w->rx_drop) {
+                w->rx[w->rx_len] = '\0';   /* always NUL-terminate (buffer sized rx_len+len+1); some
+                                            * peers, e.g. Gemini, deliver JSON as a binary frame */
                 if (lws_frame_is_binary(wsi)) {
                     if (w->o.on_binary) w->o.on_binary(w->o.user, w->rx, w->rx_len);
                 } else if (w->o.on_text) {
-                    w->rx[w->rx_len] = '\0';
                     w->o.on_text(w->o.user, (const char *) w->rx, w->rx_len);
                 }
             }

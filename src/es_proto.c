@@ -225,8 +225,10 @@ void es_proto_send_start(es_proto_ctx_t *p, es_ws_t *ws)
 
     if (p->kind == ES_PROTO_GEMINI) {                 /* setup must be the first message */
         if (p->cfg) { es_send_text_z(ws, p->cfg); return; }
+        /* Live model names churn fast; the "…-latest" alias is the most stable default. Operators
+         * normally supply model/voice/system-prompt via EARSHOT_SESSION_CONFIG (sent verbatim above). */
         es_send_text_z(ws,
-            "{\"setup\":{\"model\":\"models/gemini-2.0-flash-exp\","
+            "{\"setup\":{\"model\":\"models/gemini-2.5-flash-native-audio-latest\","
             "\"generationConfig\":{\"responseModalities\":[\"AUDIO\"]}}}");
         return;
     }
@@ -318,9 +320,10 @@ void es_proto_send_audio(es_proto_ctx_t *p, es_ws_t *ws, const int16_t *pcm, siz
             n = snprintf(msg, sizeof msg, "{\"type\":\"input_audio_buffer.append\",\"audio\":\"%s\"}", b64);
         else if (p->kind == ES_PROTO_ELEVENLABS)
             n = snprintf(msg, sizeof msg, "{\"user_audio_chunk\":\"%s\"}", b64);
-        else  /* gemini */
+        else  /* gemini: current Live API uses realtimeInput.audio (the old mediaChunks[] is dropped
+               * by 2.5+ models); automatic activity detection handles turn boundaries on silence */
             n = snprintf(msg, sizeof msg,
-                "{\"realtimeInput\":{\"mediaChunks\":[{\"mimeType\":\"audio/pcm;rate=%d\",\"data\":\"%s\"}]}}",
+                "{\"realtimeInput\":{\"audio\":{\"mimeType\":\"audio/pcm;rate=%d\",\"data\":\"%s\"}}}",
                 p->rate, b64);
         if (n > 0) es_ws_send_text(ws, msg, (size_t) n);
         return;
@@ -678,9 +681,15 @@ void es_proto_on_binary(es_proto_ctx_t *p, const void *data, size_t len, const e
 {
     int16_t pcm[SWITCH_RECOMMENDED_BUFFER_SIZE];
     size_t ns;
-    if (!p || !data || !len || !sink || !sink->on_audio) return;
+    if (!p || !data || !len || !sink) return;
+    if (p->kind == ES_PROTO_GEMINI) {   /* Gemini Live delivers its JSON (control + audio) as BINARY
+                                         * frames, not text — parse them through the text path */
+        es_proto_on_text(p, (const char *) data, len, sink);
+        return;
+    }
+    if (!sink->on_audio) return;
     if (p->kind == ES_PROTO_TWILIO || p->kind == ES_PROTO_OPENAI ||
-        p->kind == ES_PROTO_ELEVENLABS || p->kind == ES_PROTO_GEMINI) return;  /* audio is text-framed */
+        p->kind == ES_PROTO_ELEVENLABS) return;  /* audio is text-framed */
     if (p->kind == ES_PROTO_PIPECAT) { es_pipecat_on_binary(p, (const uint8_t *) data, len, sink); return; }
     /* native + deepgram + vapi: raw codec-coded audio */
     if (len > SWITCH_RECOMMENDED_BUFFER_SIZE) len = SWITCH_RECOMMENDED_BUFFER_SIZE;  /* clamp */
