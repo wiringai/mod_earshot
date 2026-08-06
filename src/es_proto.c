@@ -66,8 +66,6 @@ es_codec_t es_proto_force_codec(es_proto_kind_t k, es_codec_t requested)
     switch (k) {
     case ES_PROTO_TWILIO:                             /* Twilio Media Streams = mu-law 8k */
         return ES_CODEC_PCMU;
-    case ES_PROTO_ELEVENLABS:                         /* ulaw_8000 (telephony) */
-        return ES_CODEC_PCMU;
     case ES_PROTO_GEMINI:                             /* pcm 16k in / 24k out */
     case ES_PROTO_PIPECAT:                            /* raw L16 protobuf */
     case ES_PROTO_ASSEMBLYAI:                         /* Universal-Streaming: raw PCM16 (linear) */
@@ -76,6 +74,7 @@ es_codec_t es_proto_force_codec(es_proto_kind_t k, es_codec_t requested)
     case ES_PROTO_OPENAI:                             /* OpenAI Realtime: g711 8k, or pcm16 (resampled) */
     case ES_PROTO_DEEPGRAM:                           /* Deepgram Voice Agent: g711 or linear16 */
     case ES_PROTO_VAPI:                               /* Vapi WS: pcm_s16le or mulaw (set at create-call) */
+    case ES_PROTO_ELEVENLABS:                         /* convai: ulaw_8000 default, or pcm16 (codec=l16) */
         return (requested == ES_CODEC_PCMU || requested == ES_CODEC_PCMA ||
                 requested == ES_CODEC_L16) ? requested : ES_CODEC_PCMU;
     default:
@@ -96,9 +95,12 @@ const char *es_proto_extra_header_value(es_proto_kind_t k)
 }
 const char *es_proto_subprotocol(es_proto_kind_t k)
 {
-    /* OpenAI Realtime answers the upgrade with Sec-WebSocket-Protocol: realtime,
-     * so we must advertise exactly that. Other agents use no subprotocol. */
-    return (k == ES_PROTO_OPENAI) ? "realtime" : NULL;
+    /* Some endpoints answer the upgrade with a specific Sec-WebSocket-Protocol and reject a
+     * mismatch: OpenAI Realtime -> "realtime", ElevenLabs convai -> "convai". Advertise exactly
+     * what the server expects; other agents use no subprotocol. */
+    if (k == ES_PROTO_OPENAI)     return "realtime";
+    if (k == ES_PROTO_ELEVENLABS) return "convai";
+    return NULL;
 }
 
 /* codec -> the vendor's audio-format object for the session handshake.
@@ -309,7 +311,7 @@ void es_proto_send_audio(es_proto_ctx_t *p, es_ws_t *ws, const int16_t *pcm, siz
         char b64[2 * SWITCH_RECOMMENDED_BUFFER_SIZE];
         char msg[3 * SWITCH_RECOMMENDED_BUFFER_SIZE];
         int  n;
-        nb = es_encode(p->codec, pcm, nsamples, enc);   /* codec: openai g711/l16, 11labs ulaw, gemini l16 */
+        nb = es_encode(p->codec, pcm, nsamples, enc);   /* codec: openai g711/l16, 11labs ulaw|l16, gemini l16 */
         if (nb == (size_t) -1) return;
         switch_b64_encode(enc, nb, (unsigned char *) b64, sizeof b64);
         if (p->kind == ES_PROTO_OPENAI)

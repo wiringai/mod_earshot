@@ -5,6 +5,13 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 
 ## [Unreleased]
 
+### Fixed
+- **ElevenLabs adapter now works against real convai agents** (previously never connected). It now
+  advertises the required **`convai`** WebSocket subprotocol (the server answers with it and rejects a
+  mismatch), and it **respects `codec=`/`rate=`** instead of forcing µ-law — so `codec=l16 rate=16000`
+  matches a `pcm_16000` agent while the µ-law default keeps existing telephony setups unchanged.
+  **Live-validated** end-to-end (bidirectional audio on a real agent).
+
 ### Added
 - **Cartesia adapter** (`proto=cartesia`) — Cartesia ink-whisper **STT** (transcription): PCM16 audio out
   (~100 ms chunks, shared coalescer with `assemblyai`), `{"type":"transcript",…}` in → `earshot::transcript`.
