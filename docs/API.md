@@ -16,7 +16,7 @@ Begin streaming the channel's audio to `url` (`ws://` or `wss://`).
 | Option | Values | Default | Notes |
 |---|---|---|---|
 | `id` | `<name>` | *(default stream)* | fan-out: name this stream so many can run on one channel |
-| `proto` | `native` `twilio` `openai` `deepgram` `vapi` `elevenlabs` `gemini` `pipecat` `assemblyai` | `native` | wire adapter (see [Protocol adapters](#protocol-adapters)) |
+| `proto` | `native` `twilio` `openai` `deepgram` `vapi` `elevenlabs` `gemini` `pipecat` `assemblyai` `cartesia` | `native` | wire adapter (see [Protocol adapters](#protocol-adapters)) |
 | `codec` | `pcmu` `pcma` `l16` | `pcmu` | g711 = 8-bit telephony (½ the bytes); some protos pin the codec |
 | `rate` | `8000` `16000` `24000` | `8000` | wire rate; resampled to/from the channel rate |
 | `dir` | `in` `out` `both` | `both` | `in` = caller→agent only (read-only **fork**, no playback); `both` = bidirectional agent |
@@ -146,6 +146,10 @@ Full framing details in [FEATURES.md](../FEATURES.md#2-protocol-adapters--); in 
   Transcription only: PCM16 audio out (`codec=l16`, coalesced to ≥50 ms chunks), `transcript` JSON in →
   [`earshot::transcript`](#events-subclass-earshot) events. Use `dir=in` as a read-only fork; auth is the
   raw API key in the `Authorization` header via `EARSHOT_AUTH`. No audio comes back (no playback).
+- **`cartesia`** — Cartesia ink-whisper **STT** (`wss://api.cartesia.ai/stt/websocket?model=ink-whisper&…`).
+  Transcription only: PCM16 audio out (`codec=l16`, ~100 ms chunks), `{"type":"transcript",…}` in →
+  [`earshot::transcript`](#events-subclass-earshot). Use `dir=in`. The raw API key rides the URL as
+  `access_token=` (with `encoding=pcm_s16le`, `sample_rate=`, `cartesia_version=`) — no auth header needed.
 
 For `openai`/`deepgram`/`gemini`/`elevenlabs`, provide the full session config (voice/model/keys) via
 the `EARSHOT_SESSION_CONFIG` channel variable; otherwise Earshot sends an audio-format default. For

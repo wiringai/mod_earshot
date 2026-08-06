@@ -6,6 +6,10 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 ## [Unreleased]
 
 ### Added
+- **Cartesia adapter** (`proto=cartesia`) — Cartesia ink-whisper **STT** (transcription): PCM16 audio out
+  (~100 ms chunks, shared coalescer with `assemblyai`), `{"type":"transcript",…}` in → `earshot::transcript`.
+  Audio-in only (`dir=in` fork, no playback); the raw API key rides the URL as `access_token=` (with
+  `model`/`encoding`/`sample_rate`/`cartesia_version`) — no auth header needed. **Live-validated** end-to-end.
 - **AssemblyAI adapter** (`proto=assemblyai`) — AssemblyAI Universal-Streaming **STT** (transcription):
   PCM16 audio out (coalesced to ≥50 ms chunks — the vendor rejects smaller), `transcript` JSON in →
   a new **`earshot::transcript`** event (`text`, `final`, `corr`, `stream-id`). Audio-in only (use

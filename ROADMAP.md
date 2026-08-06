@@ -56,8 +56,8 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
 ## Tier 2 — The adoption unlock
 
 - ☑ **Protocol adapters** (`es_proto.c`): `native`, `twilio`, `openai`, `deepgram`, `vapi`, `elevenlabs`,
-  `gemini`, `pipecat`, `assemblyai` — an agent written for any of these works against Earshot unmodified.
-  - **`openai`, `deepgram`, `vapi`, and `assemblyai` are live-validated against the real vendors** on real SIP calls;
+  `gemini`, `pipecat`, `assemblyai`, `cartesia` — an agent written for any of these works against Earshot unmodified.
+  - **`openai`, `deepgram`, `vapi`, `assemblyai`, and `cartesia` are live-validated against the real vendors** on real SIP calls;
     `native`, `twilio`, and `pipecat` are validated by full-duplex
     round-trip against a local echo agent; `elevenlabs` and `gemini` are implemented but not yet
     live-validated (see the README status table). Framing detail per adapter:
@@ -80,6 +80,9 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
       ≥50 ms chunks (vendor rejects <50 ms), `transcript` JSON in → the new `earshot::transcript` event
       (`text`/`final`); `dir=in` fork, raw API key in `Authorization` via `EARSHOT_AUTH`. **Live-validated**
       end-to-end (accurate partial + final transcripts on a real call).
+    - `cartesia`: ink-whisper **STT** (transcription, no playback) — PCM16 out (~100 ms chunks, shared
+      coalescer), `{type:transcript}` in → `earshot::transcript`; `dir=in` fork, raw API key rides the URL
+      as `access_token=` (no auth header). **Live-validated** end-to-end (accurate finals on a real call).
   - Session config (voice/model/keys/prompt) defaults to an audio-only handshake, or the caller supplies
     a full JSON via the `EARSHOT_SESSION_CONFIG` channel variable (sent verbatim).
 - ☑ **Control channel** (`commands=true`, opt-in): the agent sends `{"type":"command","action":…}`

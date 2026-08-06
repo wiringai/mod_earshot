@@ -41,6 +41,7 @@ es_proto_kind_t es_proto_from_name(const char *name)
     if (!strcasecmp(name, "pipecat"))   return ES_PROTO_PIPECAT;
     if (!strcasecmp(name, "vapi"))      return ES_PROTO_VAPI;
     if (!strcasecmp(name, "assemblyai"))return ES_PROTO_ASSEMBLYAI;
+    if (!strcasecmp(name, "cartesia"))  return ES_PROTO_CARTESIA;
     return ES_PROTO_NATIVE;
 }
 
@@ -55,6 +56,7 @@ const char *es_proto_name(es_proto_kind_t k)
     case ES_PROTO_PIPECAT:    return "pipecat";
     case ES_PROTO_VAPI:       return "vapi";
     case ES_PROTO_ASSEMBLYAI: return "assemblyai";
+    case ES_PROTO_CARTESIA:   return "cartesia";
     default:                  return "native";
     }
 }
@@ -69,6 +71,7 @@ es_codec_t es_proto_force_codec(es_proto_kind_t k, es_codec_t requested)
     case ES_PROTO_GEMINI:                             /* pcm 16k in / 24k out */
     case ES_PROTO_PIPECAT:                            /* raw L16 protobuf */
     case ES_PROTO_ASSEMBLYAI:                         /* Universal-Streaming: raw PCM16 (linear) */
+    case ES_PROTO_CARTESIA:                           /* ink-whisper STT: raw PCM16 (pcm_s16le) */
         return ES_CODEC_L16;
     case ES_PROTO_OPENAI:                             /* OpenAI Realtime: g711 8k, or pcm16 (resampled) */
     case ES_PROTO_DEEPGRAM:                           /* Deepgram Voice Agent: g711 or linear16 */
@@ -331,9 +334,9 @@ void es_proto_send_audio(es_proto_ctx_t *p, es_ws_t *ws, const int16_t *pcm, siz
         return;
     }
 
-    if (p->kind == ES_PROTO_ASSEMBLYAI) {
-        /* AssemblyAI requires 50-1000ms per message; our media frames are ~20ms, so coalesce
-         * to ~100ms before sending (else it closes the socket with error 3007). */
+    if (p->kind == ES_PROTO_ASSEMBLYAI || p->kind == ES_PROTO_CARTESIA) {
+        /* Both STT vendors want >=50ms (Cartesia ~100ms) per message; our media frames are ~20ms,
+         * so coalesce to ~100ms before sending (AssemblyAI else closes with error 3007). */
         size_t target = (size_t) p->rate / 10 * 2;         /* ~100ms of L16 @ wire rate (bytes) */
         nb = es_encode(ES_CODEC_L16, pcm, nsamples, enc);  /* PCM16 */
         if (nb == (size_t) -1) return;
@@ -557,6 +560,19 @@ void es_proto_on_text(es_proto_ctx_t *p, const char *data, size_t len, const es_
         if (tr && tr->valuestring && sink->on_transcript) {
             cJSON *eot = cJSON_GetObjectItem(root, "end_of_turn");
             sink->on_transcript(sink->user, tr->valuestring, eot && cJSON_IsTrue(eot));
+        }
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (p->kind == ES_PROTO_CARTESIA) {                      /* STT: {type:transcript, text, is_final} */
+        node = cJSON_GetObjectItem(root, "type");            /* flush_done / done / error are ignored */
+        e = (node && node->valuestring) ? node->valuestring : "";
+        if (!strcmp(e, "transcript") && sink->on_transcript) {
+            cJSON *tr  = cJSON_GetObjectItem(root, "text");
+            cJSON *fin = cJSON_GetObjectItem(root, "is_final");
+            if (tr && tr->valuestring)
+                sink->on_transcript(sink->user, tr->valuestring, fin && cJSON_IsTrue(fin));
         }
         cJSON_Delete(root);
         return;
