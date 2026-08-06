@@ -5,9 +5,20 @@
 # Earshot — `mod_earshot`
 
 > A FreeSWITCH module that streams live call audio to your AI agent over a WebSocket —
-> and plays the agent's voice back — full duplex, with seven ready-made protocol adapters,
+> and plays the agent's voice back — full duplex, with ten ready-made protocol adapters,
 > module-side turn detection, agent-driven call control, PCI masking, multi-stream fan-out,
 > and built-in latency metrics.
+
+<p align="center">
+  <a href="FEATURES.md"><b>Features</b></a> &nbsp;·&nbsp;
+  <a href="WHY.md">Why</a> &nbsp;·&nbsp;
+  <a href="QUICKSTART.md">Quickstart</a> &nbsp;·&nbsp;
+  <a href="docs/API.md">API</a> &nbsp;·&nbsp;
+  <a href="docs/ARCHITECTURE.md">Architecture</a> &nbsp;·&nbsp;
+  <a href="ROADMAP.md">Roadmap</a> &nbsp;·&nbsp;
+  <a href="SECURITY.md">Security</a> &nbsp;·&nbsp;
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
 ---
 
