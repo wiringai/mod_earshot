@@ -6,6 +6,11 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 ## [Unreleased]
 
 ### Added
+- **Vapi adapter** (`proto=vapi`) — Vapi's WebSocket transport: raw binary audio both ways
+  (`pcm_s16le`/`mulaw`, set at REST `POST /call`), JSON control mapped to barge-in
+  (`speech-update` role=user / `user-interrupted`). The per-call `websocketCallUrl` is the
+  credential — no handshake, auth header, or subprotocol. **Live-validated** end-to-end on a real
+  Vapi assistant (bidirectional audio + barge-in). Match `codec=`/`rate=` to the call's `audioFormat`.
 - **Caller context + welcome greeting** — `EARSHOT_META` passes per-call context (customer id, tier,
   reason, …) to the agent verbatim as the `X-Earshot-Meta` handshake header, readable by any agent
   framework at connect regardless of `proto`. `greeting=<file>` (or `EARSHOT_GREETING`) plays a fixed

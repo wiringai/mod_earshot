@@ -37,6 +37,7 @@ es_proto_kind_t es_proto_from_name(const char *name)
     if (!strcasecmp(name, "elevenlabs"))return ES_PROTO_ELEVENLABS;
     if (!strcasecmp(name, "gemini"))    return ES_PROTO_GEMINI;
     if (!strcasecmp(name, "pipecat"))   return ES_PROTO_PIPECAT;
+    if (!strcasecmp(name, "vapi"))      return ES_PROTO_VAPI;
     return ES_PROTO_NATIVE;
 }
 
@@ -49,6 +50,7 @@ const char *es_proto_name(es_proto_kind_t k)
     case ES_PROTO_ELEVENLABS: return "elevenlabs";
     case ES_PROTO_GEMINI:     return "gemini";
     case ES_PROTO_PIPECAT:    return "pipecat";
+    case ES_PROTO_VAPI:       return "vapi";
     default:                  return "native";
     }
 }
@@ -65,6 +67,7 @@ es_codec_t es_proto_force_codec(es_proto_kind_t k, es_codec_t requested)
         return ES_CODEC_L16;
     case ES_PROTO_OPENAI:                             /* OpenAI Realtime: g711 8k, or pcm16 (resampled) */
     case ES_PROTO_DEEPGRAM:                           /* Deepgram Voice Agent: g711 or linear16 */
+    case ES_PROTO_VAPI:                               /* Vapi WS: pcm_s16le or mulaw (set at create-call) */
         return (requested == ES_CODEC_PCMU || requested == ES_CODEC_PCMA ||
                 requested == ES_CODEC_L16) ? requested : ES_CODEC_PCMU;
     default:
@@ -323,7 +326,7 @@ void es_proto_send_audio(es_proto_ctx_t *p, es_ws_t *ws, const int16_t *pcm, siz
         return;
     }
 
-    /* native + deepgram: raw codec-coded binary frame */
+    /* native + deepgram + vapi: raw codec-coded binary frame */
     nb = es_encode(p->codec, pcm, nsamples, enc);
     if (nb != (size_t) -1) es_ws_send_binary(ws, enc, nb);
 }
@@ -508,6 +511,23 @@ void es_proto_on_text(es_proto_ctx_t *p, const char *data, size_t len, const es_
         return;
     }
 
+    if (p->kind == ES_PROTO_VAPI) {                           /* audio arrives as binary; text = control JSON */
+        node = cJSON_GetObjectItem(root, "type");
+        e = (node && node->valuestring) ? node->valuestring : "";
+        /* Vapi drives interruption server-side; flush queued agent audio when it signals a barge.
+         * (Message set finalised against live traffic; module VAD vad_barge is the vendor-agnostic
+         * fallback.) */
+        if (!strcmp(e, "user-interrupted")) {
+            if (sink->on_clear) sink->on_clear(sink->user);
+        } else if (!strcmp(e, "speech-update")) {
+            const char *st = es_json_str(root, "status"), *role = es_json_str(root, "role");
+            if (!strcmp(st, "started") && !strcmp(role, "user") && sink->on_clear)
+                sink->on_clear(sink->user);                    /* caller started talking = barge-in */
+        }
+        cJSON_Delete(root);
+        return;
+    }
+
     if (p->kind == ES_PROTO_ELEVENLABS) {
         node = cJSON_GetObjectItem(root, "type");
         e = (node && node->valuestring) ? node->valuestring : "";
@@ -610,7 +630,7 @@ void es_proto_on_binary(es_proto_ctx_t *p, const void *data, size_t len, const e
     if (p->kind == ES_PROTO_TWILIO || p->kind == ES_PROTO_OPENAI ||
         p->kind == ES_PROTO_ELEVENLABS || p->kind == ES_PROTO_GEMINI) return;  /* audio is text-framed */
     if (p->kind == ES_PROTO_PIPECAT) { es_pipecat_on_binary(p, (const uint8_t *) data, len, sink); return; }
-    /* native + deepgram: raw codec-coded audio */
+    /* native + deepgram + vapi: raw codec-coded audio */
     if (len > SWITCH_RECOMMENDED_BUFFER_SIZE) len = SWITCH_RECOMMENDED_BUFFER_SIZE;  /* clamp */
     ns = es_decode(p->codec, (const uint8_t *) data, len, pcm);
     if (ns != (size_t) -1 && ns) es_emit_audio(p, pcm, ns, sink);
