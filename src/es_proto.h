@@ -16,6 +16,8 @@
  *   pipecat   — Pipecat protobuf Frame{ audio: AudioRawFrame } both ways, InterruptionFrame = barge-in
  *   vapi      — Vapi WebSocket transport: raw binary audio both ways (pcm_s16le/mulaw, set at REST
  *               create-call), JSON control; user-interrupted / speech-update(user,started) = barge-in
+ *   assemblyai— AssemblyAI Universal-Streaming STT: raw binary PCM16 out, `Turn` transcript JSON in
+ *               (audio in only — no playback); transcripts surface via the on_transcript sink
  *
  * An agent written for any of these works against Earshot unmodified.
  *
@@ -44,7 +46,8 @@ typedef enum {
     ES_PROTO_ELEVENLABS,   /* ElevenLabs Conversational AI */
     ES_PROTO_GEMINI,       /* Google Gemini Live (BidiGenerateContent) */
     ES_PROTO_PIPECAT,      /* Pipecat protobuf frames */
-    ES_PROTO_VAPI          /* Vapi WebSocket transport (raw binary audio + JSON control) */
+    ES_PROTO_VAPI,         /* Vapi WebSocket transport (raw binary audio + JSON control) */
+    ES_PROTO_ASSEMBLYAI    /* AssemblyAI Universal-Streaming STT (audio in, transcripts out; no playback) */
 } es_proto_kind_t;
 
 es_proto_kind_t es_proto_from_name(const char *name);   /* defaults to native */
@@ -73,6 +76,8 @@ typedef struct {
     /* control channel: agent -> call action, pre-translated to a whitelisted uuid_* API.
      * api==NULL means the action was not recognized. id echoes back in the result. */
     void (*on_command)(void *user, const char *action, const char *api, const char *arg, const char *id);
+    /* STT transcript (assemblyai): recognized text; is_final marks an end-of-turn result. May be NULL. */
+    void (*on_transcript)(void *user, const char *text, int is_final);
 } es_proto_sink_t;
 
 typedef struct es_proto_ctx es_proto_ctx_t;

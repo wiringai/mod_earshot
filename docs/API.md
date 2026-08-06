@@ -16,7 +16,7 @@ Begin streaming the channel's audio to `url` (`ws://` or `wss://`).
 | Option | Values | Default | Notes |
 |---|---|---|---|
 | `id` | `<name>` | *(default stream)* | fan-out: name this stream so many can run on one channel |
-| `proto` | `native` `twilio` `openai` `deepgram` `vapi` `elevenlabs` `gemini` `pipecat` | `native` | wire adapter (see [Protocol adapters](#protocol-adapters)) |
+| `proto` | `native` `twilio` `openai` `deepgram` `vapi` `elevenlabs` `gemini` `pipecat` `assemblyai` | `native` | wire adapter (see [Protocol adapters](#protocol-adapters)) |
 | `codec` | `pcmu` `pcma` `l16` | `pcmu` | g711 = 8-bit telephony (½ the bytes); some protos pin the codec |
 | `rate` | `8000` `16000` `24000` | `8000` | wire rate; resampled to/from the channel rate |
 | `dir` | `in` `out` `both` | `both` | `in` = caller→agent only (read-only **fork**, no playback); `both` = bidirectional agent |
@@ -82,6 +82,7 @@ Off by default; unknown/disabled → `{"ok":false,"error":…}`.
 | `earshot::ready` | `corr` | playback gate opens (also sets `earshot_ready=true`) |
 | `earshot::speech_started` / `earshot::speech_stopped` | `corr` | VAD turn boundaries (sets `earshot_talking`) |
 | `earshot::dtmf` | `digit` or `masked` | caller DTMF (`masked=true`, digit redacted, during a mask window) |
+| `earshot::transcript` | `text`, `final`, `corr`, `stream-id` | STT result (`proto=assemblyai`); `final=true` is an end-of-turn result, `false` a partial |
 | `earshot::command` | `action`, `api`, `ok`, `result` | a control-channel command ran |
 | `earshot::metrics` | counters + latency KPIs (`first-audio-ms`, `ws-rtt-ms`, …) | periodic / on-close / on-demand |
 
@@ -141,6 +142,10 @@ Full framing details in [FEATURES.md](../FEATURES.md#2-protocol-adapters--); in 
 - **`elevenlabs`** — ElevenLabs Conversational AI (`user_audio_chunk` / `{type:audio}`, auto `ping`→`pong`).
 - **`gemini`** — Gemini Live (`setup`, `realtimeInput.mediaChunks` 16k / `serverContent` 24k; resampled).
 - **`pipecat`** — Pipecat protobuf `Frame{ audio: AudioRawFrame }` (binary L16).
+- **`assemblyai`** — AssemblyAI Universal-Streaming **STT** (`wss://streaming.assemblyai.com/v3/ws?sample_rate=…`).
+  Transcription only: PCM16 audio out (`codec=l16`, coalesced to ≥50 ms chunks), `transcript` JSON in →
+  [`earshot::transcript`](#events-subclass-earshot) events. Use `dir=in` as a read-only fork; auth is the
+  raw API key in the `Authorization` header via `EARSHOT_AUTH`. No audio comes back (no playback).
 
 For `openai`/`deepgram`/`gemini`/`elevenlabs`, provide the full session config (voice/model/keys) via
 the `EARSHOT_SESSION_CONFIG` channel variable; otherwise Earshot sends an audio-format default. For

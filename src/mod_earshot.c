@@ -28,6 +28,7 @@
 #define EARSHOT_EVENT_SPEECH_START "earshot::speech_started"
 #define EARSHOT_EVENT_SPEECH_STOP  "earshot::speech_stopped"
 #define EARSHOT_EVENT_DTMF         "earshot::dtmf"
+#define EARSHOT_EVENT_TRANSCRIPT   "earshot::transcript"
 
 /* turn notifications sent to the agent (vad_notify=on) */
 #define ES_TURN_START "{\"type\":\"speech_started\"}"
@@ -42,7 +43,7 @@
 #define EARSHOT_SYNTAX \
     "<uuid> start <url> [id=<name>] [codec=l16|pcmu|pcma] [rate=8000|16000|24000] [dir=in|out|both]\n" \
     "\t  fan-out: many streams per channel via id=; dir=in is a read-only fork (transcription/monitor)\n" \
-    "\t\t[proto=native|twilio|openai|deepgram|elevenlabs|gemini|pipecat|vapi]\n" \
+    "\t\t[proto=native|twilio|openai|deepgram|elevenlabs|gemini|pipecat|vapi|assemblyai]\n" \
     "\t\t[ready=firstframe|connect|manual]\n" \
     "\t\t[vad=on [vad_barge=on] [vad_notify=on] [vad_mode=-1..3] [vad_voice_ms=200] [vad_silence_ms=500]]\n" \
     "\t\t[interruptible=none|dtmf|speech|any] [ignore_backchannel=on] [sensitivity=low|medium|high]\n" \
@@ -457,6 +458,27 @@ static void es_sink_mark(void *user, const char *name)
  * send_dtmf action rather than this inbound sink, which is intentionally a no-op. */
 static void es_sink_dtmf(void *user, const char *digit) { (void) user; (void) digit; }
 
+/* STT transcript (assemblyai) -> earshot::transcript {text, final, corr, stream-id}. Runs on the ws
+ * thread; st->session is valid here (the service thread is muted + joined before st is freed, same
+ * as es_on_ws_event). is_final marks an end-of-turn result; partials arrive with final=false. */
+static void es_sink_transcript(void *user, const char *text, int is_final)
+{
+    es_stream_t *st = (es_stream_t *) user;
+    switch_event_t *event = NULL;
+    if (!st->session || !text || !*text) return;
+    if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, EARSHOT_EVENT_TRANSCRIPT) != SWITCH_STATUS_SUCCESS)
+        return;
+    /* Correlate by uuid + corr only. Transcripts are high-frequency (partials fire many times a
+     * second), so we deliberately skip switch_channel_event_set_data()'s full channel-variable copy
+     * per event — that keeps the event bus cheap under load. */
+    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Unique-ID", switch_core_session_get_uuid(st->session));
+    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "corr", st->corr);
+    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "stream-id", st->id[0] ? st->id : "default");
+    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "final", is_final ? "true" : "false");
+    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "text", text);
+    switch_event_fire(&event);
+}
+
 /* control channel: run the whitelisted uuid_* API on the caller's channel. Runs on the ws
  * thread; the uuid_* APIs locate the session themselves (the event-socket pattern). Gated by
  * commands=true so an agent can't drive the call unless the dialplan opted in. */
@@ -787,6 +809,7 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
     st->sink.on_mark  = es_sink_mark;
     st->sink.on_dtmf  = es_sink_dtmf;
     st->sink.on_command = es_sink_command;
+    st->sink.on_transcript = es_sink_transcript;
     switch_copy_string(st->uuid, switch_core_session_get_uuid(session), sizeof st->uuid);
     switch_queue_create(&st->marks, 64, pool);
 
@@ -1111,6 +1134,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_earshot_load)
     switch_event_reserve_subclass(EARSHOT_EVENT_SPEECH_START);
     switch_event_reserve_subclass(EARSHOT_EVENT_SPEECH_STOP);
     switch_event_reserve_subclass(EARSHOT_EVENT_DTMF);
+    switch_event_reserve_subclass(EARSHOT_EVENT_TRANSCRIPT);
 
     SWITCH_ADD_API(api_interface, "earshot", "Earshot audio-stream control", earshot_api_function, EARSHOT_SYNTAX);
     SWITCH_ADD_APP(app_interface, "earshot", "Earshot audio stream", "Stream channel audio to an AI agent over WebSocket",
@@ -1156,6 +1180,7 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_earshot_shutdown)
     switch_event_free_subclass(EARSHOT_EVENT_SPEECH_START);
     switch_event_free_subclass(EARSHOT_EVENT_SPEECH_STOP);
     switch_event_free_subclass(EARSHOT_EVENT_DTMF);
+    switch_event_free_subclass(EARSHOT_EVENT_TRANSCRIPT);
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_earshot shutdown\n");
     return SWITCH_STATUS_SUCCESS;
 }

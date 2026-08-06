@@ -6,6 +6,13 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 ## [Unreleased]
 
 ### Added
+- **AssemblyAI adapter** (`proto=assemblyai`) — AssemblyAI Universal-Streaming **STT** (transcription):
+  PCM16 audio out (coalesced to ≥50 ms chunks — the vendor rejects smaller), `transcript` JSON in →
+  a new **`earshot::transcript`** event (`text`, `final`, `corr`, `stream-id`). Audio-in only (use
+  `dir=in` as a read-only fork; no playback); auth is the raw API key in the `Authorization` header via
+  `EARSHOT_AUTH`. The transcript event is lightweight (uuid + corr, no full channel-variable copy) since
+  partials fire many times per second. **Live-validated** end-to-end (accurate partial + final
+  transcripts on a real call).
 - **Vapi adapter** (`proto=vapi`) — Vapi's WebSocket transport: raw binary audio both ways
   (`pcm_s16le`/`mulaw`, set at REST `POST /call`), JSON control mapped to barge-in
   (`speech-update` role=user / `user-interrupted`). The per-call `websocketCallUrl` is the
