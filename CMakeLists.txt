@@ -64,7 +64,7 @@ if(FS_FOUND)
 
   # --- .deb packaging (cpack --config build/CPackConfig.cmake -G DEB) ---------
   set(CPACK_PACKAGE_NAME "mod-earshot")
-  set(CPACK_PACKAGE_VERSION "0.1.0")
+  set(CPACK_PACKAGE_VERSION "0.2.0")
   set(CPACK_PACKAGE_CONTACT "Varun Pratap Singh")
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Earshot — FreeSWITCH <-> AI-agent audio bridge (mod_earshot)")
   set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/wiringai/mod_earshot")

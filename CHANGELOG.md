@@ -5,6 +5,8 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-08-06
+
 ### Fixed
 - **Gemini adapter now works against current Gemini Live** (previously never worked). Gemini delivers
   its JSON — `setupComplete`, `serverContent` audio, interruptions — as **binary** WebSocket frames, which
@@ -109,5 +111,6 @@ status table in the README).
   found and fixed in peer review; covered by `test/test_pb.c`.
 - The control channel is **off by default**, opt-in per stream, and whitelisted to call-control APIs.
 
-[Unreleased]: https://github.com/wiringai/mod_earshot/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/wiringai/mod_earshot/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/wiringai/mod_earshot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/wiringai/mod_earshot/releases/tag/v0.1.0
