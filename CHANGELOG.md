@@ -6,6 +6,12 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 ## [Unreleased]
 
 ### Added
+- **Caller context + welcome greeting** — `EARSHOT_META` passes per-call context (customer id, tier,
+  reason, …) to the agent verbatim as the `X-Earshot-Meta` handshake header, readable by any agent
+  framework at connect regardless of `proto`. `greeting=<file>` (or `EARSHOT_GREETING`) plays a fixed
+  audio prompt into the channel the moment the ready gate opens — ahead of the agent's first words,
+  with no model round-trip — loaded once at `start` and resampled to the channel rate; pairs with
+  `ready=connect` so it leads, and barge-in cuts it like any other playout.
 - **Box-level mutual TLS (mTLS) + custom CA** — `EARSHOT_TLS_CLIENT_CERT` / `EARSHOT_TLS_CLIENT_KEY`
   present a client certificate on every agent connection; `EARSHOT_TLS_CA` verifies the agent against
   a private CA instead of the system trust store (**box-wide** — public-CA endpoints then fail unless

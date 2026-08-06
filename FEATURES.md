@@ -93,6 +93,8 @@ start ... ready=firstframe    # default: open on the agent's first audio frame
           ready=manual        # open only on an explicit `earshot <uuid> resume`
 ```
 
+A **welcome greeting** can ride this gate — see [§15](#15-caller-context--welcome-greeting--).
+
 ## 5. Barge-in — a policy engine  ✓
 
 Turn detection stays live during playback; when the caller interrupts, buffered agent audio is
@@ -271,6 +273,34 @@ played back while the forks did not; stopping one fork left the others running.
 - **PCI/PII masking** shipped (§8): mute audio + redact DTMF to the agent during card entry.
 - ☐ Planned: per-stream (multi-identity) mTLS, per-action command scoping, OAuth refresh, consent-gated recording.
 
+## 15. Caller context & welcome greeting  ✓
+
+Two setup-time touches that make an agent feel like it already knows the caller.
+
+**Caller context** — set `EARSHOT_META` (a customer id, account tier, call reason, campaign — any
+compact, single-line string; JSON is the natural shape). Earshot sends it verbatim as the
+`X-Earshot-Meta` header on the WebSocket handshake, next to `X-Call-ID` / `X-Channel-UUID` /
+`X-Correlation-ID`, so **any** agent framework reads it at connect, independent of `proto`. It's
+transport-level handshake context; proto-specific session config (voice, model, prompt) still rides
+`EARSHOT_SESSION_CONFIG`.
+
+```xml
+<action application="set" data="EARSHOT_META={&quot;customer_id&quot;:&quot;C-8842&quot;,&quot;tier&quot;:&quot;gold&quot;}"/>
+```
+
+**Welcome greeting** — `greeting=<file>` (or `EARSHOT_GREETING` for a path with spaces) plays a fixed
+audio prompt into the channel the moment the [ready gate](#4-ready-gate--) opens, **ahead of the
+agent's first words** — no model round-trip, and it never lands in silence. Loaded once at `start`
+and resampled to the channel rate (any format FreeSWITCH can open, bounded to 15 s). It's emitted
+before any agent audio by whichever thread opens the gate, so it leads in **every** `ready` mode;
+barge-in cuts it like any other playout. Use `ready=connect` to greet as soon as the socket connects
+rather than on the agent's first frame. For a *dynamic* greeting use the agent's own (e.g. Deepgram's
+`greeting`) or pre-render to a file — `greeting=` is a prompt, not TTS.
+
+```
+start wss://agent.example/… ready=connect greeting=/opt/prompts/welcome.wav
+```
+
 ---
 
 ## Command & option reference
@@ -280,13 +310,14 @@ played back while the forks did not; stopping one fork left the others running.
 · `ready=firstframe|connect|manual` · `vad=on` · `vad_barge=on` · `vad_notify=on`
 · `vad_mode=-1..3` · `vad_voice_ms=<n>` · `vad_silence_ms=<n>` · `dtmf=on` · `mask=on` · `commands=true`
 · `metrics=<seconds>` · `corr=auto|<id>` · `auth=<token>` (or the `EARSHOT_AUTH` var for a value with a space)
+· `greeting=<file>` (or the `EARSHOT_GREETING` var)
 
 **Verbs** (all accept an optional `id=<name>` after the verb to target a fan-out stream):
 `start` · `stop` · `pause` · `resume` · `flush` · `send <text>` · `mask on|off` · `status` · `metrics`
 
 **Channel variables**: `EARSHOT_SESSION_CONFIG` (openai/deepgram/gemini/elevenlabs) · `EARSHOT_AUTH`
-· `EARSHOT_NO_RECONNECT` · `EARSHOT_TLS_NO_HOSTNAME_CHECK` · (set by earshot) `earshot_ready`
-· `earshot_talking` · `earshot_masking`
+· `EARSHOT_META` · `EARSHOT_GREETING` · `EARSHOT_NO_RECONNECT` · `EARSHOT_TLS_NO_HOSTNAME_CHECK`
+· (set by earshot) `earshot_ready` · `earshot_talking` · `earshot_masking`
 
 **Events**: `earshot::connected` · `earshot::ready` · `earshot::metrics` · `earshot::command` · `earshot::dtmf`
 · `earshot::speech_started` · `earshot::speech_stopped`

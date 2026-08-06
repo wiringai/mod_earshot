@@ -36,6 +36,9 @@ Begin streaming the channel's audio to `url` (`ws://` or `wss://`).
 | `metrics` | `<seconds>` | `0` | emit `earshot::metrics` every N seconds |
 | `corr` | `auto` \| `<id>` | `auto` | correlation id; `auto` = SIP Call-ID |
 | `auth` | `<token>` (no spaces) | — | `Authorization` header. A value **containing a space** (`Bearer <key>`, `Token <key>`) must be passed via the **`EARSHOT_AUTH`** channel variable instead — the option list is split on spaces, so `auth=Bearer …` would truncate to `Bearer` |
+| `greeting` | `<file>` (no spaces) | — | welcome audio played into the channel the moment the [ready gate](#ready-gate) opens, ahead of the agent's first words (see [Welcome greeting](#welcome-greeting)). A path **with spaces** goes via the **`EARSHOT_GREETING`** channel variable |
+
+Caller context (customer id, tier, call reason, …) is passed to the agent at connect via the **`EARSHOT_META`** channel variable — see [Caller context](#caller-context).
 
 ### `stop` · `pause` · `resume`
 Tear down / suspend / resume the stream. Channel hangup also tears down cleanly.
@@ -91,6 +94,37 @@ land in silence. `ready=firstframe` (default) opens on the agent's first audio f
 on the WS handshake; `ready=manual` waits for `earshot <uuid> resume`. Opening fires `earshot::ready`
 and sets the `earshot_ready` channel variable.
 
+## Welcome greeting
+
+`greeting=<file>` (or the `EARSHOT_GREETING` channel variable for paths with spaces) plays an audio
+file to the caller **the instant the ready gate opens**, ahead of the agent's first words — a
+module-owned prompt that never lands in silence and needs no round-trip to the model. The file is
+loaded once at `start` and resampled to the channel rate (any format FreeSWITCH can open; bounded to
+15 s). It is emitted into the playout *before* any agent audio — whichever thread opens the gate
+emits it first — so it leads in **every** `ready` mode (`firstframe`, `connect`, `manual`), with the
+agent's reply queued behind it. Use `ready=connect` when you want the greeting to play as soon as the
+socket connects rather than waiting on the agent's first frame. Barge-in (`flush` / `vad_barge`) cuts
+it like any other playout. Read-only forks (`dir=in`) never play back and ignore it.
+
+For a **dynamic** greeting, prefer the agent's own (e.g. Deepgram's `greeting` in
+`EARSHOT_SESSION_CONFIG`) or pre-render the text to a file — `greeting=` is a fixed audio prompt, not
+TTS.
+
+## Caller context
+
+Set the **`EARSHOT_META`** channel variable to pass per-call context to the agent at setup — a
+customer id, account tier, call reason, campaign, anything. Earshot sends it verbatim as the
+**`X-Earshot-Meta`** header on the WebSocket handshake (alongside `X-Call-ID` / `X-Channel-UUID` /
+`X-Correlation-ID`), so it's readable by any agent framework at connect, regardless of `proto`.
+Keep it compact and single-line (it's an HTTP header) — JSON is the natural shape:
+
+```xml
+<action application="set" data="EARSHOT_META={&quot;customer_id&quot;:&quot;C-8842&quot;,&quot;tier&quot;:&quot;gold&quot;,&quot;reason&quot;:&quot;billing&quot;}"/>
+```
+
+This is transport-level context for the handshake; proto-specific in-band session config (voices,
+models, prompts) still goes through `EARSHOT_SESSION_CONFIG`.
+
 ## Protocol adapters
 
 `proto=` selects how audio + control map onto the wire, so an existing agent works unchanged.
@@ -112,6 +146,8 @@ the `EARSHOT_SESSION_CONFIG` channel variable; otherwise Earshot sends an audio-
 | Variable | Purpose |
 |---|---|
 | `EARSHOT_SESSION_CONFIG` | verbatim first message for openai/deepgram/gemini/elevenlabs |
+| `EARSHOT_META` | opaque caller context → `X-Earshot-Meta` handshake header (see [Caller context](#caller-context)) |
+| `EARSHOT_GREETING` | welcome-audio file path (alternative to `greeting=` for paths with spaces) |
 | `EARSHOT_NO_RECONNECT` | disable auto-reconnect (default: reconnect with jittered backoff) |
 | `EARSHOT_TLS_NO_HOSTNAME_CHECK` | skip wss cert/hostname checks (dev only) |
 | `earshot_ready` / `earshot_talking` / `earshot_masking` | **set by** Earshot for dialplan logic |
