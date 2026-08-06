@@ -18,6 +18,8 @@
  *               create-call), JSON control; user-interrupted / speech-update(user,started) = barge-in
  *   assemblyai— AssemblyAI Universal-Streaming STT: raw binary PCM16 out, `Turn` transcript JSON in
  *               (audio in only — no playback); transcripts surface via the on_transcript sink
+ *   cartesia  — Cartesia ink-whisper STT: raw binary PCM16 out, {type:transcript} JSON in (audio in
+ *               only — no playback); access_token + config in the URL query, transcripts via on_transcript
  *
  * An agent written for any of these works against Earshot unmodified.
  *
@@ -47,7 +49,8 @@ typedef enum {
     ES_PROTO_GEMINI,       /* Google Gemini Live (BidiGenerateContent) */
     ES_PROTO_PIPECAT,      /* Pipecat protobuf frames */
     ES_PROTO_VAPI,         /* Vapi WebSocket transport (raw binary audio + JSON control) */
-    ES_PROTO_ASSEMBLYAI    /* AssemblyAI Universal-Streaming STT (audio in, transcripts out; no playback) */
+    ES_PROTO_ASSEMBLYAI,   /* AssemblyAI Universal-Streaming STT (audio in, transcripts out; no playback) */
+    ES_PROTO_CARTESIA      /* Cartesia ink-whisper STT (audio in, transcripts out; no playback) */
 } es_proto_kind_t;
 
 es_proto_kind_t es_proto_from_name(const char *name);   /* defaults to native */
