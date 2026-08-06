@@ -54,7 +54,7 @@ service, or — for the self-hosted Pipecat wire format — its official protobu
 | AssemblyAI (streaming STT)   | `assemblyai` | ✅ live-validated · transcription (`dir=in`) |
 | Cartesia (streaming STT)     | `cartesia`   | ✅ live-validated · transcription (`dir=in`) |
 | Pipecat                      | `pipecat`    | ✅ validated (protobuf) |
-| ElevenLabs Conversational AI | `elevenlabs` | adapter ✓            |
+| ElevenLabs Conversational AI | `elevenlabs` | ✅ live-validated    |
 | Google Gemini Live           | `gemini`     | adapter ✓            |
 | Twilio Media Streams         | `twilio`     | adapter ✓ · framing echo-tested |
 

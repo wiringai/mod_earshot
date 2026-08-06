@@ -57,9 +57,9 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
 
 - ☑ **Protocol adapters** (`es_proto.c`): `native`, `twilio`, `openai`, `deepgram`, `vapi`, `elevenlabs`,
   `gemini`, `pipecat`, `assemblyai`, `cartesia` — an agent written for any of these works against Earshot unmodified.
-  - **`openai`, `deepgram`, `vapi`, `assemblyai`, and `cartesia` are live-validated against the real vendors** on real SIP calls;
+  - **`openai`, `deepgram`, `vapi`, `assemblyai`, `cartesia`, and `elevenlabs` are live-validated against the real vendors** on real SIP calls;
     `native`, `twilio`, and `pipecat` are validated by full-duplex
-    round-trip against a local echo agent; `elevenlabs` and `gemini` are implemented but not yet
+    round-trip against a local echo agent; `gemini` is implemented but not yet
     live-validated (see the README status table). Framing detail per adapter:
     - `twilio`: `connected`+`start` framing, base64 μ-law media both ways, **mark echo-on-drain**.
     - `openai`: `session.update` handshake (g711_ulaw + server_vad), append out / delta in,
@@ -69,8 +69,9 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
       `POST /call`), JSON control; `speech-update`(role user) / `user-interrupted` = barge-in. The
       per-call `websocketCallUrl` is the credential (no handshake/auth header). Live-validated
       end-to-end (bidirectional audio + barge on a real assistant).
-    - `elevenlabs`: `user_audio_chunk` out / `{type:audio}` in (base64 ulaw_8000), **auto `ping`→`pong`
-      keepalive** (validated), `interruption` = barge-in.
+    - `elevenlabs`: convai — **`convai` subprotocol** (required), `user_audio_chunk` out / `{type:audio}` in,
+      **auto `ping`→`pong` keepalive**, `interruption` = barge-in. µ-law default, or `codec=l16 rate=16000`
+      to match a `pcm_16000` agent. **Live-validated** end-to-end (bidirectional audio on a real convai agent).
     - `gemini`: `setup` handshake (validated), `realtimeInput.mediaChunks` out / `serverContent` in,
       **asymmetric 16 kHz-in / 24 kHz-out resampled** transparently, `serverContent.interrupted`.
     - `pipecat`: binary **protobuf** `Frame{ audio: AudioRawFrame }` both ways (round-trip validated);
