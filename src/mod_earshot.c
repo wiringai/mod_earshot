@@ -43,6 +43,8 @@
     "\t\t[proto=native|twilio|openai|deepgram|elevenlabs|gemini|pipecat]\n" \
     "\t\t[ready=firstframe|connect|manual]\n" \
     "\t\t[vad=on [vad_barge=on] [vad_notify=on] [vad_mode=-1..3] [vad_voice_ms=200] [vad_silence_ms=500]]\n" \
+    "\t\t[interruptible=none|dtmf|speech|any] [ignore_backchannel=on] [sensitivity=low|medium|high]\n" \
+    "\t\t[barge_min_ms=<n>] [barge_fade_ms=<n>]\n" \
     "\t\t[dtmf=on] [mask=on] [commands=true] [metrics=<seconds>] [corr=auto|<id>] [auth=<token> | EARSHOT_AUTH var]\n" \
     "\t  control channel (commands=true): agent sends {\"type\":\"command\",\"action\":...}\n" \
     "\t  actions: transfer|hangup|send_dtmf|play|stop_play|record|setvar|hold|bridge|park\n" \
@@ -67,6 +69,18 @@ typedef enum {
     ES_READY_CONNECT,          /* as soon as the WebSocket connects */
     ES_READY_MANUAL            /* only after an explicit `resume` */
 } es_ready_mode_t;
+
+/* barge-in policy: what (if anything) interrupts the agent while it's speaking. */
+typedef enum {
+    ES_BARGE_NONE = 0,   /* agent finishes; the caller can't cut in */
+    ES_BARGE_DTMF,       /* caller DTMF interrupts */
+    ES_BARGE_SPEECH,     /* caller speech interrupts (module-side VAD) */
+    ES_BARGE_ANY         /* speech OR DTMF */
+} es_barge_t;
+
+/* Fade-out scratch cap (samples). Clamps barge_fade_ms so the ramp uses a small stack buffer;
+ * covers ~256 ms at 16 kHz / ~85 ms at 48 kHz — telephony channels are 8/16 kHz. */
+#define ES_FADE_MAX_SAMPLES 4096
 
 typedef struct {
     switch_core_session_t *session;    /* owning session (WS thread is joined before it is torn down) */
@@ -94,6 +108,16 @@ typedef struct {
     int              vad_mode, vad_voice_ms, vad_silence_ms, vad_thresh;
     switch_bool_t    talking;       /* current VAD talk state */
     uint64_t         speech_starts; /* number of caller talk-spurts (metric) */
+
+    /* barge-in policy (interruptible= / ignore_backchannel / sensitivity / barge_min_ms / barge_fade_ms) */
+    es_barge_t       barge;         /* what interrupts the agent */
+    switch_bool_t    barge_explicit;/* interruptible= was given (so vad_barge shouldn't override it) */
+    int              barge_min_ms;  /* sustained caller speech before a speech barge (0 = immediate) */
+    int              barge_fade_ms; /* fade playback out over this long instead of a hard cut (0 = hard) */
+    switch_bool_t    barge_pending; /* a speech barge is deferred, waiting for barge_min_ms of speech */
+    switch_time_t    barge_at;      /* fire the deferred barge at/after this time (µs) */
+    int              chan_rate;     /* channel sample rate (for the fade ramp) */
+    uint64_t         barges;        /* barge-ins performed (metric) */
 
     es_ready_mode_t  ready_mode;    /* when to open the ready-gate */
     switch_bool_t    ready;         /* ready-gate: playback allowed? (set off media path) */
@@ -168,6 +192,7 @@ static void es_fire_metrics(switch_core_session_t *session, es_stream_t *st)
     switch_event_add_header(event, SWITCH_STACK_BOTTOM, "play-drops",     "%" SWITCH_UINT64_T_FMT, st->play_drops);
     switch_event_add_header(event, SWITCH_STACK_BOTTOM, "commands",       "%" SWITCH_UINT64_T_FMT, st->commands);
     switch_event_add_header(event, SWITCH_STACK_BOTTOM, "speech-starts",   "%" SWITCH_UINT64_T_FMT, st->speech_starts);
+    switch_event_add_header(event, SWITCH_STACK_BOTTOM, "barges",          "%" SWITCH_UINT64_T_FMT, st->barges);
     switch_event_add_header(event, SWITCH_STACK_BOTTOM, "talking",         "%d", st->talking);
     switch_event_add_header(event, SWITCH_STACK_BOTTOM, "dtmf",            "%" SWITCH_UINT64_T_FMT, st->dtmf_count);
     switch_event_add_header(event, SWITCH_STACK_BOTTOM, "masking",         "%d", st->masking);
@@ -183,6 +208,35 @@ static void es_fire_metrics(switch_core_session_t *session, es_stream_t *st)
     switch_event_add_header(event, SWITCH_STACK_BOTTOM, "turns",          "%" SWITCH_UINT64_T_FMT, st->turns);
     switch_event_add_header(event, SWITCH_STACK_BOTTOM, "duration-ms",    "%" SWITCH_UINT64_T_FMT, dur_ms);
     switch_event_fire(&event);
+}
+
+/* Fade the queued playback out over ~fade_ms instead of a hard cut, so barge-in doesn't click.
+ * Keeps the immediate next fade_ms of audio, ramps it 1->0, drops everything after. Caller holds
+ * play_mutex. */
+static void es_fade_out(switch_buffer_t *buf, int fade_ms, int rate)
+{
+    int16_t tmp[ES_FADE_MAX_SAMPLES];
+    size_t have = switch_buffer_inuse(buf);
+    size_t n = (size_t) fade_ms * (rate > 0 ? rate : 8000) / 1000;
+    if (n > ES_FADE_MAX_SAMPLES) n = ES_FADE_MAX_SAMPLES;
+    if (n * 2 > have) n = have / 2;
+    if (n == 0) { switch_buffer_zero(buf); return; }
+    switch_buffer_read(buf, tmp, n * 2);   /* pull the immediate next audio out */
+    switch_buffer_zero(buf);               /* drop everything queued after the fade tail */
+    for (size_t i = 0; i < n; i++)         /* linear ramp 1.0 -> 0.0 across the tail */
+        tmp[i] = (int16_t) ((int32_t) tmp[i] * (int32_t) (n - i) / (int32_t) n);
+    switch_buffer_write(buf, tmp, n * 2);  /* the caller now hears a fade to silence, not a cut */
+}
+
+/* Interrupt the agent: fade or hard-cut the queued playback per barge_fade_ms. */
+static void es_barge_now(es_stream_t *st)
+{
+    if (!st->play_buf) return;
+    switch_mutex_lock(st->play_mutex);
+    if (st->barge_fade_ms > 0) es_fade_out(st->play_buf, st->barge_fade_ms, st->chan_rate);
+    else                       switch_buffer_zero(st->play_buf);
+    switch_mutex_unlock(st->play_mutex);
+    st->barges++;
 }
 
 /* Caller DTMF hook: capture digits -> earshot::dtmf + forward to the agent. During a
@@ -203,6 +257,9 @@ static switch_status_t es_dtmf_hook(switch_core_session_t *session, const switch
         es_fire_event(session, EARSHOT_EVENT_DTMF, "digit", d);
         if (st->ws) es_proto_send_dtmf(st->proto_ctx, st->ws, d);
     }
+    /* barge on caller DTMF (interruptible=dtmf|any), but not during a card-entry masking window */
+    if (!st->masking && (st->barge == ES_BARGE_DTMF || st->barge == ES_BARGE_ANY))
+        es_barge_now(st);
     return SWITCH_STATUS_SUCCESS;
 }
 
@@ -246,7 +303,21 @@ static switch_bool_t es_apply_option(es_stream_t *st, const char *kv)
     } else if (!strcasecmp(key, "vad_thresh")) {
         st->vad_thresh = atoi(val);              /* energy threshold */
     } else if (!strcasecmp(key, "vad_barge")) {
-        st->vad_barge = (switch_bool_t) switch_true(val);   /* flush playback when caller speaks */
+        st->vad_barge = (switch_bool_t) switch_true(val);   /* back-compat alias for interruptible=speech */
+        if (st->vad_barge && !st->barge_explicit) st->barge = ES_BARGE_SPEECH;
+    } else if (!strcasecmp(key, "interruptible")) {         /* what interrupts the agent */
+        st->barge = !strcasecmp(val, "any")    ? ES_BARGE_ANY    :
+                    !strcasecmp(val, "dtmf")   ? ES_BARGE_DTMF   :
+                    !strcasecmp(val, "speech") ? ES_BARGE_SPEECH : ES_BARGE_NONE;
+        st->barge_explicit = SWITCH_TRUE;
+    } else if (!strcasecmp(key, "ignore_backchannel")) {   /* drop short "yeah/okay" — require sustained speech */
+        if (switch_true(val) && st->barge_min_ms <= 0) st->barge_min_ms = 300;
+    } else if (!strcasecmp(key, "sensitivity")) {          /* preset for the sustained-speech gate */
+        st->barge_min_ms = !strcasecmp(val, "high") ? 150 : !strcasecmp(val, "low") ? 600 : 300;
+    } else if (!strcasecmp(key, "barge_min_ms")) {
+        st->barge_min_ms = atoi(val);                      /* sustained speech before a barge (0 = immediate) */
+    } else if (!strcasecmp(key, "barge_fade_ms")) {
+        st->barge_fade_ms = atoi(val);                     /* fade playback out this long vs a hard cut */
     } else if (!strcasecmp(key, "vad_notify")) {
         st->vad_notify = (switch_bool_t) switch_true(val);  /* send turn JSON to the agent */
     } else if (!strcasecmp(key, "dtmf")) {
@@ -449,15 +520,24 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
                         switch_channel_set_variable(switch_core_session_get_channel(s), "earshot_talking", "true");
                         es_fire_event(s, EARSHOT_EVENT_SPEECH_START, "corr", st->corr);
                     }
-                    if (st->vad_barge && st->play_buf) {      /* caller spoke -> interrupt the agent */
-                        switch_mutex_lock(st->play_mutex);
-                        switch_buffer_zero(st->play_buf);
-                        switch_mutex_unlock(st->play_mutex);
+                    if (st->barge == ES_BARGE_SPEECH || st->barge == ES_BARGE_ANY) {
+                        if (st->barge_min_ms <= 0) {
+                            es_barge_now(st);                    /* interrupt immediately */
+                        } else {                                 /* defer: needs sustained speech (backchannel filter) */
+                            st->barge_pending = SWITCH_TRUE;
+                            /* Wait out the VAD's silence hangover on top of barge_min_ms: `talking` stays
+                             * latched until vad_silence_ms of trailing silence, so a short backchannel's
+                             * STOP_TALKING (which cancels barge_pending) must land first. Effective filter:
+                             * a caller who keeps voicing past ~vad_voice_ms + barge_min_ms. */
+                            st->barge_at = switch_micro_time_now()
+                                         + (switch_time_t) (st->barge_min_ms + st->vad_silence_ms) * 1000;
+                        }
                     }
                     if (st->vad_notify && st->ws) es_ws_send_text(st->ws, ES_TURN_START, strlen(ES_TURN_START));
                 } else if (vs == SWITCH_VAD_STATE_STOP_TALKING && st->talking) {
                     switch_core_session_t *s = switch_core_media_bug_get_session(bug);
                     st->talking = SWITCH_FALSE;
+                    st->barge_pending = SWITCH_FALSE;            /* speech ended before the gate -> it was a backchannel */
                     st->turn_end_time = switch_micro_time_now();   /* start the response-latency clock */
                     st->awaiting_response = SWITCH_TRUE;
                     if (s) {
@@ -465,6 +545,12 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
                         es_fire_event(s, EARSHOT_EVENT_SPEECH_STOP, "corr", st->corr);
                     }
                     if (st->vad_notify && st->ws) es_ws_send_text(st->ws, ES_TURN_STOP, strlen(ES_TURN_STOP));
+                }
+                /* deferred speech barge: fire once the caller sustains speech past barge_min_ms
+                 * (short backchannels like "yeah/okay" stop first and never trip it) */
+                if (st->barge_pending && st->talking && switch_micro_time_now() >= st->barge_at) {
+                    es_barge_now(st);
+                    st->barge_pending = SWITCH_FALSE;
                 }
             }
         }
@@ -610,6 +696,7 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
         if (switch_core_session_get_read_impl(session, &read_impl) == SWITCH_STATUS_SUCCESS
             && read_impl.actual_samples_per_second)
             chan_rate = read_impl.actual_samples_per_second;
+        st->chan_rate = chan_rate;                     /* for the barge fade-out ramp */
         st->proto_ctx = es_proto_create(st->proto, st->codec, st->rate, chan_rate, st->corr,
                                         switch_core_session_get_uuid(session),
                                         switch_channel_get_variable(channel, "EARSHOT_SESSION_CONFIG"));
@@ -621,6 +708,12 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
             if (st->vad_silence_ms) switch_vad_set_param(st->vad, "silence_ms", st->vad_silence_ms);
             if (st->vad_thresh)     switch_vad_set_param(st->vad, "thresh",     st->vad_thresh);
         }
+        /* a speech barge needs the module VAD; warn if the operator asked for one without vad=on */
+        if ((st->barge == ES_BARGE_SPEECH || st->barge == ES_BARGE_ANY) && !st->vad)
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                "earshot: interruptible=%s needs vad=on for the speech barge; "
+                "without it only DTMF (if enabled) interrupts\n",
+                st->barge == ES_BARGE_ANY ? "any" : "speech");
     }
     if (!st->proto_ctx) { stream->write_function(stream, "-ERR proto init failed\n"); return SWITCH_STATUS_FALSE; }
     st->sink.user     = st;
@@ -714,14 +807,14 @@ static switch_status_t es_simple(switch_core_session_t *session, const char *ver
         stream->write_function(stream,
             "{\"proto\":\"%s\",\"corr\":\"%s\",\"tx_frames\":%llu,\"tx_bytes\":%llu,"
             "\"rx_frames\":%llu,\"rx_bytes\":%llu,\"play_drops\":%llu,\"commands\":%llu,"
-            "\"speech_starts\":%llu,\"talking\":%d,\"dtmf\":%llu,\"masking\":%d,\"play_buffered\":%u,"
+            "\"speech_starts\":%llu,\"barges\":%llu,\"talking\":%d,\"dtmf\":%llu,\"masking\":%d,\"play_buffered\":%u,"
             "\"first_audio_ms\":%llu,\"response_ms\":%llu,\"response_ms_max\":%llu,\"turns\":%llu,"
             "\"ws_connected\":%d,\"ws_reconnects\":%u,\"ws_queue_drops\":%llu,\"ws_rtt_ms\":%ld}\n",
             es_proto_name(st->proto), st->corr,
             (unsigned long long) st->tx_frames, (unsigned long long) st->tx_bytes,
             (unsigned long long) st->rx_frames, (unsigned long long) st->rx_bytes,
             (unsigned long long) st->play_drops, (unsigned long long) st->commands,
-            (unsigned long long) st->speech_starts, st->talking,
+            (unsigned long long) st->speech_starts, (unsigned long long) st->barges, st->talking,
             (unsigned long long) st->dtmf_count, st->masking,
             st->play_buf ? (unsigned) switch_buffer_inuse(st->play_buf) : 0,
             (unsigned long long) st->first_audio_ms, (unsigned long long) st->resp_ms_last,

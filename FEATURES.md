@@ -93,13 +93,27 @@ start ... ready=firstframe    # default: open on the agent's first audio frame
           ready=manual        # open only on an explicit `earshot <uuid> resume`
 ```
 
-## 5. Barge-in  ✓
+## 5. Barge-in — a policy engine  ✓
 
-Turn detection stays live during playback; when the caller (or the agent's protocol) signals an
-interruption, buffered agent audio is dropped instantly.
+Turn detection stays live during playback; when the caller interrupts, buffered agent audio is
+dropped — but *what* interrupts, *when*, and *how* are all configurable:
 
-- `earshot <uuid> flush` — clear queued playback now.
-- Twilio `clear`, OpenAI `speech_started`, Deepgram `UserStartedSpeaking` all map to the same flush.
+- **What interrupts** — `interruptible=none|dtmf|speech|any` (caller speech via module VAD, caller
+  DTMF, both, or nothing). `vad_barge=on` is the back-compat alias for `interruptible=speech`.
+- **Ignore backchannels** — `ignore_backchannel=on` (or `sensitivity=low|medium|high`, or an explicit
+  `barge_min_ms=<n>`) requires *sustained* caller speech before cutting the agent, so short "yeah/okay"
+  don't interrupt.
+- **Graceful fade** — `barge_fade_ms=<n>` fades the playout to silence over a linear ramp instead of a
+  hard cut (no click); default `0` = instant cut.
+- **Manual / protocol** — `earshot <uuid> flush`, and Twilio `clear` / OpenAI `speech_started` /
+  Deepgram `UserStartedSpeaking` all map to the same flush. DTMF barge is suppressed inside a PCI
+  masking window.
+
+```
+start ... interruptible=speech sensitivity=medium ignore_backchannel=on barge_fade_ms=40
+```
+
+The `barges` counter is surfaced in `earshot::metrics`.
 
 ## 6. Turn detection — module-side VAD  ✓
 
