@@ -14,6 +14,8 @@
  *   elevenlabs— Conversational AI: user_audio_chunk out / audio events in, ping->pong keepalive
  *   gemini    — Gemini Live: setup handshake, realtimeInput out / serverContent in, 16k-in/24k-out
  *   pipecat   — Pipecat protobuf Frame{ audio: AudioRawFrame } both ways, InterruptionFrame = barge-in
+ *   vapi      — Vapi WebSocket transport: raw binary audio both ways (pcm_s16le/mulaw, set at REST
+ *               create-call), JSON control; user-interrupted / speech-update(user,started) = barge-in
  *
  * An agent written for any of these works against Earshot unmodified.
  *
@@ -41,7 +43,8 @@ typedef enum {
     ES_PROTO_DEEPGRAM,
     ES_PROTO_ELEVENLABS,   /* ElevenLabs Conversational AI */
     ES_PROTO_GEMINI,       /* Google Gemini Live (BidiGenerateContent) */
-    ES_PROTO_PIPECAT       /* Pipecat protobuf frames */
+    ES_PROTO_PIPECAT,      /* Pipecat protobuf frames */
+    ES_PROTO_VAPI          /* Vapi WebSocket transport (raw binary audio + JSON control) */
 } es_proto_kind_t;
 
 es_proto_kind_t es_proto_from_name(const char *name);   /* defaults to native */

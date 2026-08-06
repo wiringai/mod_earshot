@@ -42,7 +42,7 @@
 #define EARSHOT_SYNTAX \
     "<uuid> start <url> [id=<name>] [codec=l16|pcmu|pcma] [rate=8000|16000|24000] [dir=in|out|both]\n" \
     "\t  fan-out: many streams per channel via id=; dir=in is a read-only fork (transcription/monitor)\n" \
-    "\t\t[proto=native|twilio|openai|deepgram|elevenlabs|gemini|pipecat]\n" \
+    "\t\t[proto=native|twilio|openai|deepgram|elevenlabs|gemini|pipecat|vapi]\n" \
     "\t\t[ready=firstframe|connect|manual]\n" \
     "\t\t[vad=on [vad_barge=on] [vad_notify=on] [vad_mode=-1..3] [vad_voice_ms=200] [vad_silence_ms=500]]\n" \
     "\t\t[interruptible=none|dtmf|speech|any] [ignore_backchannel=on] [sensitivity=low|medium|high]\n" \
