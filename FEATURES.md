@@ -8,7 +8,7 @@ tooling never delivered.
 > Status legend: **✓ shipped** · ◐ partial · ☐ planned
 > The core call path — full-duplex audio, VAD/turn-taking, barge-in, DTMF/PCI masking, fan-out, and
 > the control channel — is validated end-to-end on real SIP calls (`sipp` + real audio). Protocol
-> adapters vary by vendor: `native`, `openai`, `deepgram`, and `pipecat` are validated against the
+> adapters vary by vendor: `native`, `openai`, `deepgram`, `vapi`, and `pipecat` are validated against the
 > live service/schema; `twilio` is framing/echo-tested; `elevenlabs` and `gemini` are adapter-complete
 > and mock-tested in CI (not yet run against the live vendor). See the table in [README](README.md).
 
@@ -19,7 +19,7 @@ tooling never delivered.
 | Area | Capability |
 |---|---|
 | Transport | Full-duplex WebSocket (ws/wss), own service thread, never blocks the media path |
-| Protocols | `native`, `twilio`, `openai`, `deepgram`, `elevenlabs`, `gemini`, `pipecat` |
+| Protocols | `native`, `twilio`, `openai`, `deepgram`, `vapi`, `elevenlabs`, `gemini`, `pipecat` |
 | Audio | G.711 µ-law/a-law + L16; transparent resampling 8 k ↔ 16 k ↔ 24 k |
 | Turn-taking | Module-side VAD + turn events, ready-gate, barge-in (`flush` / `clear`), Twilio mark echo |
 | Fan-out | Many named streams per channel (`id=`); `dir=in` read-only forks (transcription + supervisor) |
@@ -59,6 +59,7 @@ base64, and the session handshake.
 | `twilio` | Twilio Media Streams (`connected`/`start`/`media`/`mark`), base64 µ-law | `clear` |
 | `openai` | OpenAI Realtime (`session.update`, `input_audio_buffer.append`, `response.output_audio.delta`) | `speech_started` |
 | `deepgram` | Deepgram Voice Agent (`Settings`, raw binary audio) | `UserStartedSpeaking` |
+| `vapi` | Vapi WebSocket transport (raw binary audio; per-call `websocketCallUrl` from `POST /call`) | `speech-update`(user) / `user-interrupted` |
 | `elevenlabs` | ElevenLabs Conversational AI (`user_audio_chunk` / `{type:audio}`, base64 µ-law), auto `ping`→`pong` | `interruption` |
 | `gemini` | Gemini Live (`setup`, `realtimeInput.mediaChunks` 16k / `serverContent` 24k PCM) | `serverContent.interrupted` |
 | `pipecat` | Pipecat protobuf `Frame{ audio: AudioRawFrame }` (binary, L16) | `InterruptionFrame` |
@@ -306,7 +307,7 @@ start wss://agent.example/… ready=connect greeting=/opt/prompts/welcome.wav
 ## Command & option reference
 
 **Options (`start …`)**: `id=<name>` · `dir=in|out|both` · `codec=l16|pcmu|pcma` · `rate=8000|16000|24000`
-· `proto=native|twilio|openai|deepgram|elevenlabs|gemini|pipecat`
+· `proto=native|twilio|openai|deepgram|vapi|elevenlabs|gemini|pipecat`
 · `ready=firstframe|connect|manual` · `vad=on` · `vad_barge=on` · `vad_notify=on`
 · `vad_mode=-1..3` · `vad_voice_ms=<n>` · `vad_silence_ms=<n>` · `dtmf=on` · `mask=on` · `commands=true`
 · `metrics=<seconds>` · `corr=auto|<id>` · `auth=<token>` (or the `EARSHOT_AUTH` var for a value with a space)

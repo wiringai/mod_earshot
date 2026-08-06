@@ -20,7 +20,7 @@ duplex, on one leg. That's the wedge — everything else builds on it. The full 
 **[WHY.md](WHY.md)**; the complete capability list is in **[FEATURES.md](FEATURES.md)**.
 
 - **7 wire protocols, agent unmodified** — `native`, `twilio`, `openai` (Realtime),
-  `deepgram` (Voice Agent), `elevenlabs`, `gemini` (Live), `pipecat`. Swap vendors with one word.
+  `deepgram` (Voice Agent), `vapi`, `elevenlabs`, `gemini` (Live), `pipecat`. Swap vendors with one word.
 - **Turn-taking for any agent** — module-side VAD → `speech_started`/`speech_stopped`, a ready-gate
   (no "answered into silence"), and speech-triggered barge-in.
 - **Agent drives the call** — opt-in, whitelisted control channel: transfer, hangup, DTMF, play,
@@ -49,6 +49,7 @@ service, or — for the self-hosted Pipecat wire format — its official protobu
 | OpenAI Realtime              | `openai`     | ✅ live-validated    |
 | Deepgram Voice Agent         | `deepgram`   | ✅ live-validated    |
 | Native (any WebSocket)       | `native`     | ✅ live-validated    |
+| Vapi (WebSocket transport)   | `vapi`       | ✅ live-validated    |
 | Pipecat                      | `pipecat`    | ✅ validated (protobuf) |
 | ElevenLabs Conversational AI | `elevenlabs` | adapter ✓            |
 | Google Gemini Live           | `gemini`     | adapter ✓            |

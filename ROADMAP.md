@@ -55,9 +55,9 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
 
 ## Tier 2 — The adoption unlock
 
-- ☑ **Protocol adapters** (`es_proto.c`): `native`, `twilio`, `openai`, `deepgram`, `elevenlabs`,
+- ☑ **Protocol adapters** (`es_proto.c`): `native`, `twilio`, `openai`, `deepgram`, `vapi`, `elevenlabs`,
   `gemini`, `pipecat` — an agent written for any of these works against Earshot unmodified.
-  - **`openai` and `deepgram` are live-validated against the real vendors** on real SIP calls;
+  - **`openai`, `deepgram`, and `vapi` are live-validated against the real vendors** on real SIP calls;
     `native`, `twilio`, and `pipecat` are validated by full-duplex
     round-trip against a local echo agent; `elevenlabs` and `gemini` are implemented but not yet
     live-validated (see the README status table). Framing detail per adapter:
@@ -65,6 +65,10 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
     - `openai`: `session.update` handshake (g711_ulaw + server_vad), append out / delta in,
       `realtime` subprotocol, `speech_started` = barge-in.
     - `deepgram`: `Settings` handshake (mulaw/linear16 @ 8k), raw **binary** audio, `UserStartedSpeaking`.
+    - `vapi`: WebSocket transport, raw **binary** audio both ways (pcm_s16le/mulaw set at REST
+      `POST /call`), JSON control; `speech-update`(role user) / `user-interrupted` = barge-in. The
+      per-call `websocketCallUrl` is the credential (no handshake/auth header). Live-validated
+      end-to-end (bidirectional audio + barge on a real assistant).
     - `elevenlabs`: `user_audio_chunk` out / `{type:audio}` in (base64 ulaw_8000), **auto `ping`→`pong`
       keepalive** (validated), `interruption` = barge-in.
     - `gemini`: `setup` handshake (validated), `realtimeInput.mediaChunks` out / `serverContent` in,

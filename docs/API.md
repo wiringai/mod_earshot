@@ -16,7 +16,7 @@ Begin streaming the channel's audio to `url` (`ws://` or `wss://`).
 | Option | Values | Default | Notes |
 |---|---|---|---|
 | `id` | `<name>` | *(default stream)* | fan-out: name this stream so many can run on one channel |
-| `proto` | `native` `twilio` `openai` `deepgram` `elevenlabs` `gemini` `pipecat` | `native` | wire adapter (see [Protocol adapters](#protocol-adapters)) |
+| `proto` | `native` `twilio` `openai` `deepgram` `vapi` `elevenlabs` `gemini` `pipecat` | `native` | wire adapter (see [Protocol adapters](#protocol-adapters)) |
 | `codec` | `pcmu` `pcma` `l16` | `pcmu` | g711 = 8-bit telephony (½ the bytes); some protos pin the codec |
 | `rate` | `8000` `16000` `24000` | `8000` | wire rate; resampled to/from the channel rate |
 | `dir` | `in` `out` `both` | `both` | `in` = caller→agent only (read-only **fork**, no playback); `both` = bidirectional agent |
@@ -134,12 +134,17 @@ Full framing details in [FEATURES.md](../FEATURES.md#2-protocol-adapters--); in 
 - **`twilio`** — Twilio Media Streams (`connected`/`start`/`media`/`mark`, base64 µ-law, mark echo).
 - **`openai`** — OpenAI Realtime (`session.update`, `input_audio_buffer.append`, `response.output_audio.delta`; `realtime` subprotocol, auth via `EARSHOT_AUTH`).
 - **`deepgram`** — Deepgram Voice Agent (`Settings`, raw binary audio, `UserStartedSpeaking`).
+- **`vapi`** — Vapi WebSocket transport (raw binary audio, `speech-update`/`user-interrupted` control). The
+  operator does a REST `POST /call` with `transport.provider="vapi.websocket"` and passes the returned
+  per-call `websocketCallUrl` as the `start` url; match `codec=`/`rate=` to the call's `audioFormat`
+  (e.g. `codec=l16 rate=16000` ↔ `pcm_s16le`/16000, or `codec=pcmu rate=8000` ↔ `mulaw`/8000).
 - **`elevenlabs`** — ElevenLabs Conversational AI (`user_audio_chunk` / `{type:audio}`, auto `ping`→`pong`).
 - **`gemini`** — Gemini Live (`setup`, `realtimeInput.mediaChunks` 16k / `serverContent` 24k; resampled).
 - **`pipecat`** — Pipecat protobuf `Frame{ audio: AudioRawFrame }` (binary L16).
 
 For `openai`/`deepgram`/`gemini`/`elevenlabs`, provide the full session config (voice/model/keys) via
-the `EARSHOT_SESSION_CONFIG` channel variable; otherwise Earshot sends an audio-format default.
+the `EARSHOT_SESSION_CONFIG` channel variable; otherwise Earshot sends an audio-format default. For
+`vapi` the assistant/voice/model are set in the `POST /call` body, not over the socket.
 
 ## Channel variables
 
