@@ -480,6 +480,75 @@ static void *es_pool_service(void *arg)
     return NULL;
 }
 
+/* ---- box-level client TLS (mTLS / custom CA) --------------------------- *
+ * libwebsockets binds client TLS material at the context (not per-wsi) level, and
+ * streams share pooled contexts — so this is a box-level identity: read once from the
+ * environment at pool init and applied to every pooled context. All-NULL leaves the
+ * default behaviour unchanged (server cert verified against the system trust store, no
+ * client cert). The client key must be an unencrypted PEM (passphrase keys unsupported).
+ * WARNING: EARSHOT_TLS_CA replaces the system trust store for EVERY connection on the box,
+ * so public-CA endpoints (OpenAI, Deepgram) then fail verification — set it only when all
+ * agent endpoints chain to that private CA. */
+static char *g_tls_client_cert;   /* EARSHOT_TLS_CLIENT_CERT — PEM client cert (enables mTLS)      */
+static char *g_tls_client_key;    /* EARSHOT_TLS_CLIENT_KEY  — matching private key (unencrypted)  */
+static char *g_tls_ca;            /* EARSHOT_TLS_CA          — verify server against this CA instead
+                                   *                           of the system trust store           */
+
+/* A configured TLS file that isn't readable would make lws_create_context fail and take the
+ * whole pool (every stream, mTLS or not) down. Check first and drop unreadable material with a
+ * specific error, so the transport still comes up. */
+static int es_tls_readable(const char *var, const char *path)
+{
+    if (access(path, R_OK) == 0) return 1;
+    lwsl_err("earshot: %s=%s is not readable — ignoring this TLS material\n", var, path);
+    return 0;
+}
+
+static void es_tls_load_env(void)
+{
+    const char *cert = getenv("EARSHOT_TLS_CLIENT_CERT");
+    const char *key  = getenv("EARSHOT_TLS_CLIENT_KEY");
+    const char *ca   = getenv("EARSHOT_TLS_CA");
+    int have_cert = cert && *cert, have_key = key && *key;
+
+    /* mTLS needs the cert+key as a pair; a half-config would silently present no cert. */
+    if (have_cert != have_key) {
+        lwsl_err("earshot: mTLS needs BOTH EARSHOT_TLS_CLIENT_CERT and EARSHOT_TLS_CLIENT_KEY; "
+                 "only one is set — presenting no client certificate\n");
+        have_cert = have_key = 0;
+    }
+    /* Drop material we can't read (with a specific error) rather than failing the whole context.
+     * NOTE: a readable-but-invalid cert (mismatched pair, passphrase key) can still fail
+     * lws_create_context — configure mTLS on a box whose agents all use it. */
+    if (have_cert && (!es_tls_readable("EARSHOT_TLS_CLIENT_CERT", cert) ||
+                      !es_tls_readable("EARSHOT_TLS_CLIENT_KEY",  key)))
+        have_cert = have_key = 0;
+    if (ca && *ca && !es_tls_readable("EARSHOT_TLS_CA", ca))
+        ca = NULL;
+
+    if (have_cert) {                       /* allocate the pair together; never apply a half */
+        g_tls_client_cert = es_strdup(cert);
+        g_tls_client_key  = es_strdup(key);
+        if (!g_tls_client_cert || !g_tls_client_key) {
+            free(g_tls_client_cert); g_tls_client_cert = NULL;
+            free(g_tls_client_key);  g_tls_client_key  = NULL;
+        }
+    }
+    if (ca && *ca) g_tls_ca = es_strdup(ca);
+
+    /* Make the effective state visible so a mistyped/broken config isn't a silent no-mTLS. */
+    if (g_tls_client_cert || g_tls_ca)
+        lwsl_notice("earshot: box-level TLS active — client cert %s, custom CA %s\n",
+                    g_tls_client_cert ? "on" : "off", g_tls_ca ? "on" : "off");
+}
+
+static void es_tls_free_env(void)
+{
+    free(g_tls_client_cert); g_tls_client_cert = NULL;
+    free(g_tls_client_key);  g_tls_client_key  = NULL;
+    free(g_tls_ca);          g_tls_ca          = NULL;
+}
+
 /* ---- pool lifecycle ---------------------------------------------------- */
 static int es_pool_init(void)   /* lazy, once */
 {
@@ -496,6 +565,8 @@ static int es_pool_init(void)   /* lazy, once */
     g_pool.n = (int) (cores > 0 ? cores : 1);
     if (g_pool.n > ES_POOL_MAX) g_pool.n = ES_POOL_MAX;
 
+    es_tls_load_env();   /* box-level mTLS / custom-CA material for every pooled context */
+
     for (i = 0; i < g_pool.n; i++) {
         struct lws_context_creation_info info;
         es_pool_ctx_t *p = &g_pool.c[i];
@@ -503,6 +574,9 @@ static int es_pool_init(void)   /* lazy, once */
         info.port = CONTEXT_PORT_NO_LISTEN;
         info.protocols = es_protocols;
         info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+        if (g_tls_client_cert) info.client_ssl_cert_filepath        = g_tls_client_cert;
+        if (g_tls_client_key)  info.client_ssl_private_key_filepath = g_tls_client_key;
+        if (g_tls_ca)          info.client_ssl_ca_filepath          = g_tls_ca;
         info.user = p;   /* EVENT_WAIT_CANCELLED broadcast -> find our pool ctx */
         pthread_mutex_init(&p->mu, NULL);
         p->list = NULL;
@@ -526,6 +600,7 @@ fail:
         if (p->ctx) { lws_context_destroy(p->ctx); p->ctx = NULL; }
         pthread_mutex_destroy(&p->mu);
     }
+    es_tls_free_env();
     g_pool.n = 0;
     pthread_mutex_unlock(&g_pool.mu);
     return -1;
@@ -550,6 +625,7 @@ void es_ws_global_shutdown(void)
         while (p->list) { w = p->list; p->list = w->lnext; es_free_full(w); }
         pthread_mutex_destroy(&p->mu);
     }
+    es_tls_free_env();
     g_pool.n = 0; g_pool.inited = 0;
     pthread_mutex_unlock(&g_pool.mu);
 }

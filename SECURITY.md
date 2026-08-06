@@ -29,7 +29,12 @@ at it — but the module still treats agent input defensively:
   never placed in the `earshot::dtmf` audit event during a masking window.
 - **Transport**: use `wss://` for agents across a network. `auth=<token>` (or the `EARSHOT_AUTH`
   channel variable for a value containing a space, e.g. `Bearer <key>`) sets the `Authorization`
-  header; `EARSHOT_TLS_NO_HOSTNAME_CHECK` disables cert/hostname validation and is **dev-only**.
+  header. For **mutual TLS**, set `EARSHOT_TLS_CLIENT_CERT` + `EARSHOT_TLS_CLIENT_KEY` (a box-level
+  client identity; the key must be an **unencrypted PEM**). `EARSHOT_TLS_CA` pins a private CA for the
+  agent — but it **replaces the system
+  trust store for every connection on the box**, so set it only when all agent endpoints chain to
+  that CA (otherwise public-CA vendors will fail verification). `EARSHOT_TLS_NO_HOSTNAME_CHECK`
+  disables cert/hostname validation and is **dev-only**.
 
 Reports that require an already-compromised FreeSWITCH host or a malicious operator-supplied
 configuration are generally out of scope, but tell us anyway if the impact is surprising.
