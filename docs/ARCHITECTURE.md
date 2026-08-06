@@ -45,8 +45,8 @@ A sketch of the internals, so contributors (and future-you) know where things li
   `SMBF_WRITE_REPLACE`). Only a `dir=both`/`out` stream requests `WRITE_REPLACE`, so read-only forks
   never fight over playback.
 - **`es_proto` (adapter)** — the only protocol-aware layer. Translates channel audio ↔ the wire shape
-  for all seven protocols, holds per-direction resamplers, and drives inbound audio/clear/mark/dtmf/
-  command to a small **sink** the module provides. Everything upstream is protocol-neutral.
+  for every protocol, holds per-direction resamplers, and drives inbound audio/clear/mark/dtmf/
+  transcript/command to a small **sink** the module provides. Everything upstream is protocol-neutral.
 - **`es_codec`** — L16 (passthrough) + G.711 µ-law/a-law (unit-tested ITU/Sun tables).
 - **`es_pb`** — a tiny, pure-C protobuf codec for the Pipecat `Frame` wire format (unit-tested,
   including adversarial input). No FreeSWITCH dependency.
