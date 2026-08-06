@@ -25,6 +25,8 @@ struct es_proto_ctx {
     uint64_t        out_seq;    /* Twilio sequenceNumber */
     uint64_t        out_chunk;  /* Twilio media chunk */
     uint64_t        out_ts;     /* cumulative media timestamp (ms) */
+    uint8_t         agg[8192];  /* assemblyai: coalesce ~20ms frames into >=50ms chunks (AAI err 3007) */
+    size_t          agg_len;
 };
 
 /* ---- names -------------------------------------------------------------- */
@@ -38,6 +40,7 @@ es_proto_kind_t es_proto_from_name(const char *name)
     if (!strcasecmp(name, "gemini"))    return ES_PROTO_GEMINI;
     if (!strcasecmp(name, "pipecat"))   return ES_PROTO_PIPECAT;
     if (!strcasecmp(name, "vapi"))      return ES_PROTO_VAPI;
+    if (!strcasecmp(name, "assemblyai"))return ES_PROTO_ASSEMBLYAI;
     return ES_PROTO_NATIVE;
 }
 
@@ -51,6 +54,7 @@ const char *es_proto_name(es_proto_kind_t k)
     case ES_PROTO_GEMINI:     return "gemini";
     case ES_PROTO_PIPECAT:    return "pipecat";
     case ES_PROTO_VAPI:       return "vapi";
+    case ES_PROTO_ASSEMBLYAI: return "assemblyai";
     default:                  return "native";
     }
 }
@@ -64,6 +68,7 @@ es_codec_t es_proto_force_codec(es_proto_kind_t k, es_codec_t requested)
         return ES_CODEC_PCMU;
     case ES_PROTO_GEMINI:                             /* pcm 16k in / 24k out */
     case ES_PROTO_PIPECAT:                            /* raw L16 protobuf */
+    case ES_PROTO_ASSEMBLYAI:                         /* Universal-Streaming: raw PCM16 (linear) */
         return ES_CODEC_L16;
     case ES_PROTO_OPENAI:                             /* OpenAI Realtime: g711 8k, or pcm16 (resampled) */
     case ES_PROTO_DEEPGRAM:                           /* Deepgram Voice Agent: g711 or linear16 */
@@ -326,6 +331,25 @@ void es_proto_send_audio(es_proto_ctx_t *p, es_ws_t *ws, const int16_t *pcm, siz
         return;
     }
 
+    if (p->kind == ES_PROTO_ASSEMBLYAI) {
+        /* AssemblyAI requires 50-1000ms per message; our media frames are ~20ms, so coalesce
+         * to ~100ms before sending (else it closes the socket with error 3007). */
+        size_t target = (size_t) p->rate / 10 * 2;         /* ~100ms of L16 @ wire rate (bytes) */
+        nb = es_encode(ES_CODEC_L16, pcm, nsamples, enc);  /* PCM16 */
+        if (nb == (size_t) -1) return;
+        if (p->agg_len + nb > sizeof(p->agg)) {            /* never overflow the coalesce buffer */
+            es_ws_send_binary(ws, p->agg, p->agg_len);
+            p->agg_len = 0;
+        }
+        memcpy(p->agg + p->agg_len, enc, nb);
+        p->agg_len += nb;
+        if (p->agg_len >= target) {
+            es_ws_send_binary(ws, p->agg, p->agg_len);
+            p->agg_len = 0;
+        }
+        return;
+    }
+
     /* native + deepgram + vapi: raw codec-coded binary frame */
     nb = es_encode(p->codec, pcm, nsamples, enc);
     if (nb != (size_t) -1) es_ws_send_binary(ws, enc, nb);
@@ -523,6 +547,16 @@ void es_proto_on_text(es_proto_ctx_t *p, const char *data, size_t len, const es_
             const char *st = es_json_str(root, "status"), *role = es_json_str(root, "role");
             if (!strcmp(st, "started") && !strcmp(role, "user") && sink->on_clear)
                 sink->on_clear(sink->user);                    /* caller started talking = barge-in */
+        }
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (p->kind == ES_PROTO_ASSEMBLYAI) {                    /* STT: a "transcript" field marks a Turn result */
+        cJSON *tr = cJSON_GetObjectItem(root, "transcript"); /* Begin/Termination carry no transcript */
+        if (tr && tr->valuestring && sink->on_transcript) {
+            cJSON *eot = cJSON_GetObjectItem(root, "end_of_turn");
+            sink->on_transcript(sink->user, tr->valuestring, eot && cJSON_IsTrue(eot));
         }
         cJSON_Delete(root);
         return;
