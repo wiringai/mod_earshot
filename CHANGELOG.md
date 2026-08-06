@@ -6,6 +6,13 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 ## [Unreleased]
 
 ### Fixed
+- **Gemini adapter now works against current Gemini Live** (previously never worked). Gemini delivers
+  its JSON — `setupComplete`, `serverContent` audio, interruptions — as **binary** WebSocket frames, which
+  the adapter was dropping; they're now routed through the JSON parser (es_ws NUL-terminates the receive
+  buffer for binary frames too — inert for raw-audio/protobuf consumers, which read by length). Also
+  switched the outbound audio to the current `realtimeInput.audio` (the old `mediaChunks[]` is ignored by
+  2.5+ models) and updated the default model (`gemini-2.0-flash-exp` is retired). **Live-validated**
+  end-to-end (bidirectional audio on a real native-audio agent).
 - **ElevenLabs adapter now works against real convai agents** (previously never connected). It now
   advertises the required **`convai`** WebSocket subprotocol (the server answers with it and rejects a
   mismatch), and it **respects `codec=`/`rate=`** instead of forcing µ-law — so `codec=l16 rate=16000`

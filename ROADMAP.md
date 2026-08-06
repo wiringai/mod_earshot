@@ -57,10 +57,10 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
 
 - ☑ **Protocol adapters** (`es_proto.c`): `native`, `twilio`, `openai`, `deepgram`, `vapi`, `elevenlabs`,
   `gemini`, `pipecat`, `assemblyai`, `cartesia` — an agent written for any of these works against Earshot unmodified.
-  - **`openai`, `deepgram`, `vapi`, `assemblyai`, `cartesia`, and `elevenlabs` are live-validated against the real vendors** on real SIP calls;
+  - **`openai`, `deepgram`, `vapi`, `assemblyai`, `cartesia`, `elevenlabs`, and `gemini` are live-validated against the real vendors** on real SIP calls;
     `native`, `twilio`, and `pipecat` are validated by full-duplex
-    round-trip against a local echo agent; `gemini` is implemented but not yet
-    live-validated (see the README status table). Framing detail per adapter:
+    round-trip against a local echo agent. Every adapter has now met its real vendor
+    (see the README status table). Framing detail per adapter:
     - `twilio`: `connected`+`start` framing, base64 μ-law media both ways, **mark echo-on-drain**.
     - `openai`: `session.update` handshake (g711_ulaw + server_vad), append out / delta in,
       `realtime` subprotocol, `speech_started` = barge-in.
@@ -72,8 +72,10 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
     - `elevenlabs`: convai — **`convai` subprotocol** (required), `user_audio_chunk` out / `{type:audio}` in,
       **auto `ping`→`pong` keepalive**, `interruption` = barge-in. µ-law default, or `codec=l16 rate=16000`
       to match a `pcm_16000` agent. **Live-validated** end-to-end (bidirectional audio on a real convai agent).
-    - `gemini`: `setup` handshake (validated), `realtimeInput.mediaChunks` out / `serverContent` in,
-      **asymmetric 16 kHz-in / 24 kHz-out resampled** transparently, `serverContent.interrupted`.
+    - `gemini`: Live API — `setup`, `realtimeInput.audio` out / `serverContent` in (Gemini sends **JSON as
+      binary frames**, routed through the text parser), **asymmetric 16 kHz-in / 24 kHz-out resampled**
+      transparently, `serverContent.interrupted` = barge-in. Model via `EARSHOT_SESSION_CONFIG` (names churn).
+      **Live-validated** end-to-end (bidirectional audio on a real native-audio agent).
     - `pipecat`: binary **protobuf** `Frame{ audio: AudioRawFrame }` both ways (round-trip validated);
       wire codec is a pure-C unit `es_pb.c` with **unit tests** (`test/test_pb.c`, incl. adversarial input),
       `InterruptionFrame` = barge-in.

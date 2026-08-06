@@ -8,9 +8,9 @@ tooling never delivered.
 > Status legend: **✓ shipped** · ◐ partial · ☐ planned
 > The core call path — full-duplex audio, VAD/turn-taking, barge-in, DTMF/PCI masking, fan-out, and
 > the control channel — is validated end-to-end on real SIP calls (`sipp` + real audio). Protocol
-> adapters vary by vendor: `native`, `openai`, `deepgram`, `vapi`, `assemblyai`, `cartesia`, `elevenlabs`, and `pipecat`
-> are validated against the live service/schema; `twilio` is framing/echo-tested; `gemini` is adapter-complete
-> and mock-tested in CI (not yet run against the live vendor). See the table in [README](README.md).
+> adapters vary by vendor: `native`, `openai`, `deepgram`, `vapi`, `assemblyai`, `cartesia`, `elevenlabs`, `gemini`,
+> and `pipecat` are validated against the live service/schema; `twilio` is framing/echo-tested. Every listed
+> adapter has now been run against its real vendor (or, for pipecat, its official schema). See the table in [README](README.md).
 
 ---
 
@@ -63,7 +63,7 @@ base64, and the session handshake.
 | `assemblyai` | AssemblyAI Universal-Streaming **STT** — PCM16 out (≥50 ms chunks), `transcript` in → `earshot::transcript`; `dir=in` fork, no playback | — (transcription) |
 | `cartesia` | Cartesia ink-whisper **STT** — PCM16 out (~100 ms chunks), `{type:transcript}` in → `earshot::transcript`; `access_token` in the URL, `dir=in` fork, no playback | — (transcription) |
 | `elevenlabs` | ElevenLabs Conversational AI (`convai` subprotocol; `user_audio_chunk` / `{type:audio}`; µ-law or `codec=l16 rate=16000` for pcm_16000 agents), auto `ping`→`pong` | `interruption` |
-| `gemini` | Gemini Live (`setup`, `realtimeInput.mediaChunks` 16k / `serverContent` 24k PCM) | `serverContent.interrupted` |
+| `gemini` | Gemini Live (`setup`, `realtimeInput.audio` 16k out / `serverContent` 24k PCM in; **JSON over binary frames**) | `serverContent.interrupted` |
 | `pipecat` | Pipecat protobuf `Frame{ audio: AudioRawFrame }` (binary, L16) | `InterruptionFrame` |
 
 - Twilio **mark echo-on-drain** round-trips (agents that wait on marks work).
