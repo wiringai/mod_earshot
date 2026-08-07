@@ -33,6 +33,19 @@ if(EARSHOT_TESTS)
 
   add_executable(test_cmdguard test/test_cmdguard.c src/es_cmdguard.c)
   add_test(NAME cmdguard COMMAND test_cmdguard)
+
+  # Integration test: drives the REAL control-channel dispatch (command JSON ->
+  # es_proto_on_text -> es_dispatch_command -> es_cmdguard -> sink) without FreeSWITCH,
+  # via a test-only <switch.h> stub + minimal cJSON in test/support (scoped to this target
+  # only). Proves legitimate commands are unchanged and every attack payload is blocked.
+  add_executable(test_command_dispatch
+    test/test_command_dispatch.c
+    test/support/command_dispatch_stubs.c
+    src/es_proto.c src/es_cmdguard.c src/es_codec.c src/es_pb.c)
+  target_include_directories(test_command_dispatch PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/support
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  add_test(NAME command_dispatch COMMAND test_command_dispatch)
 endif()
 
 # --- the FreeSWITCH module (skipped gracefully if FS headers are absent) ----
