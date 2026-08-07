@@ -35,8 +35,9 @@ duplex, on one leg. That's the wedge — everything else builds on it. The full 
   (streaming STT). Swap vendors with one word.
 - **Turn-taking for any agent** — module-side VAD → `speech_started`/`speech_stopped`, a ready-gate
   (no "answered into silence"), and speech-triggered barge-in.
-- **Agent drives the call** — opt-in, whitelisted control channel: transfer, hangup, DTMF, play,
-  record, hold, bridge, setvar.
+- **Agent drives the call** — opt-in, per-action control channel (`commands=play,hangup`): transfer,
+  hangup, DTMF, play, record, hold, bridge, setvar — with every argument validated (app-exec, path
+  traversal, and exec-triggering variables rejected), audited via `earshot::command`.
 - **PCI/PII masking** — mute audio + redact DTMF to the agent during card entry.
 - **Multi-stream fan-out** — agent + live transcription + supervisor on one call.
 - **Latency KPIs** — time-to-first-audio, per-turn response time, WebSocket RTT.

@@ -17,8 +17,9 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(EARSHOT_TESTS "Build the unit tests" ON)
 
-# Portable, dependency-free core (codec + protobuf) shared by the module and tests.
-set(EARSHOT_CORE_SOURCES src/es_codec.c src/es_pb.c)
+# Portable, dependency-free core (codec + protobuf + control-channel guards) shared by
+# the module and tests.
+set(EARSHOT_CORE_SOURCES src/es_codec.c src/es_pb.c src/es_cmdguard.c)
 
 # --- unit tests (no FreeSWITCH) --------------------------------------------
 if(EARSHOT_TESTS)
@@ -29,6 +30,9 @@ if(EARSHOT_TESTS)
 
   add_executable(test_pb test/test_pb.c src/es_pb.c)
   add_test(NAME pb COMMAND test_pb)
+
+  add_executable(test_cmdguard test/test_cmdguard.c src/es_cmdguard.c)
+  add_test(NAME cmdguard COMMAND test_cmdguard)
 endif()
 
 # --- the FreeSWITCH module (skipped gracefully if FS headers are absent) ----
