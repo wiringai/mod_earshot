@@ -17,7 +17,7 @@ jobs:
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake
       - name: Configure & build tests
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target test_codec test_pb --parallel
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target test_codec test_pb test_cmdguard --parallel
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
 
