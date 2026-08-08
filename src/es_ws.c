@@ -237,7 +237,13 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
     case LWS_CALLBACK_CLIENT_RECEIVE: {
         int final;
         if (!w) break;
-        if (w->kill) return -1;                        /* teardown: refuse further rx, close */
+        if (w->kill || w->suppress_events) return -1;  /* teardown: refuse further rx, close, and never call a
+                                                        * sink. suppress_events is set synchronously in es_ws_stop
+                                                        * BEFORE the owner frees its state; gating rx on it (not
+                                                        * just the async kill) closes the orphan-timeout window
+                                                        * where es_ws_destroy returns without kill/done and a late
+                                                        * receive would touch a freed play_buf. Liveness/reconnect
+                                                        * uses kill only, so this never blocks a recoverable drop. */
         w->last_rx_ms = es_now_ms();                   /* inbound data = peer is alive */
         final = lws_is_final_fragment(wsi) && !lws_remaining_packet_payload(wsi);
         if (!w->rx_drop) {
