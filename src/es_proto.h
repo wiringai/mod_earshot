@@ -100,6 +100,10 @@ void            es_proto_destroy(es_proto_ctx_t *p);
  * (e.g. ElevenLabs ping->pong). Call once after es_ws_create, before es_ws_start. */
 void            es_proto_set_ws(es_proto_ctx_t *p, es_ws_t *ws);
 
+/* Borrowed allowlist (must outlive the ctx) of variable names the `setvar` command may set;
+ * NULL or empty means no variable is settable (fail closed). */
+void            es_proto_set_setvar_allow(es_proto_ctx_t *p, const char *csv);
+
 /* Lifecycle preamble/postamble (Twilio connected+start / stop; no-op for native). */
 void es_proto_send_start(es_proto_ctx_t *p, es_ws_t *ws);
 void es_proto_send_stop (es_proto_ctx_t *p, es_ws_t *ws);

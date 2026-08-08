@@ -5,6 +5,28 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 
 ## [Unreleased]
 
+### Security
+- **Control-channel argument validation (control-channel RCE hardening).** The agent control
+  channel translated `{"type":"command",...}` into `uuid_*` APIs with arguments taken verbatim from
+  the agent, and the action whitelist was framed as the security boundary. It wasn't: `uuid_broadcast`
+  accepts FreeSWITCH's `app::args` execute form, so `{"action":"play","file":"system::…"}` ran a
+  dialplan application (shell command → **RCE**); `uuid_transfer` with `dialplan=inline`, `uuid_record`
+  paths, and `uuid_setvar` of `execute_on_`/`api_on_` variables were similar escalation vectors.
+  Arguments are now validated before execution (new pure-C, unit-tested `es_cmdguard`): the `::`
+  app-exec form, the `inline` dialplan, `..` path traversal, whitespace (which the space-joined
+  argument string let an agent use to forge a later positional argument — e.g. smuggling `inline`
+  through a `transfer` destination), and execution-triggering variable names (`setvar` is restricted
+  to identifier-shaped names, excluding the `execute`/`hook`/`api_on` families by substring) are all
+  rejected, and blocked attempts are recorded in the `earshot::command` audit with a reason.
+  Requires the opt-in control channel (`commands=`), so default deployments were never exposed.
+- **Per-action `commands=` allowlist.** `commands=` now accepts a comma list of allowed actions
+  (`commands=play,hangup`) in addition to `commands=true` (all, back-compat) / `false` (off), so
+  enabling one capability no longer grants `transfer`/`setvar`/`record`.
+- **`setvar` is fail-closed behind a `setvars=` name allowlist.** A name denylist cannot secure
+  `setvar` — identifier-clean variables such as `transfer_after_bridge` reach the `inline` dialplan
+  (RCE) through their *value* when FreeSWITCH later space-splits it — so only variable names listed
+  in `setvars=<name,...>` are settable, and none are settable by default.
+
 ## [0.2.0] — 2026-08-06
 
 ### Fixed

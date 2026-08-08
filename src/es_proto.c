@@ -3,6 +3,7 @@
  */
 #include "es_proto.h"
 #include "es_pb.h"      /* Pipecat protobuf codec (pure C, unit-tested) */
+#include "es_cmdguard.h" /* control-channel argument validation (pure C, unit-tested) */
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
@@ -22,6 +23,7 @@ struct es_proto_ctx {
     char            call_id[256];      /* real correlation id (SIP Call-ID) */
     char            channel_uuid[64];
     char           *cfg;        /* verbatim session-config JSON (openai/deepgram), or NULL */
+    const char     *setvar_allow; /* commands setvar: operator allowlist of settable var names (setvars=); NULL=none */
     uint64_t        out_seq;    /* Twilio sequenceNumber */
     uint64_t        out_chunk;  /* Twilio media chunk */
     uint64_t        out_ts;     /* cumulative media timestamp (ms) */
@@ -163,6 +165,10 @@ es_proto_ctx_t *es_proto_create(es_proto_kind_t kind, es_codec_t codec,
 }
 
 void es_proto_set_ws(es_proto_ctx_t *p, es_ws_t *ws) { if (p) p->ws = ws; }
+
+/* Operator allowlist of channel-variable names the agent may set via the `setvar` command.
+ * The pointer is borrowed (must outlive the ctx); NULL/empty means no variable is settable. */
+void es_proto_set_setvar_allow(es_proto_ctx_t *p, const char *csv) { if (p) p->setvar_allow = csv; }
 
 void es_proto_destroy(es_proto_ctx_t *p)
 {
@@ -419,9 +425,15 @@ static const char *es_json_str(cJSON *o, const char *k)
     return (i && i->valuestring) ? i->valuestring : "";
 }
 
-/* Translate an agent {"type":"command",...} into a whitelisted uuid_* API call and
- * hand it to the sink. Only these call-control actions are allowed; anything else is
- * reported unsupported (api==NULL). The uuid is the channel this stream is tapping. */
+/* Reject an argument that would escalate a whitelisted uuid_* call into code execution,
+ * a path escape, or a privileged side effect. Reports the action blocked (api==NULL) with
+ * a reason the sink surfaces in the earshot::command audit. */
+#define ES_CMD_BLOCK(reason) do { sink->on_command(sink->user, action, NULL, (reason), id); return; } while (0)
+
+/* Translate an agent {"type":"command",...} into a whitelisted uuid_* API call and hand it to
+ * the sink. Only these call-control actions are allowed (anything else is reported unsupported,
+ * api==NULL); every argument is validated (es_cmdguard) because the action whitelist is not a
+ * security boundary on its own. The uuid is the channel this stream is tapping. */
 static void es_dispatch_command(es_proto_ctx_t *p, cJSON *root, const es_proto_sink_t *sink)
 {
     const char *action = es_json_str(root, "action");
@@ -432,41 +444,67 @@ static void es_dispatch_command(es_proto_ctx_t *p, cJSON *root, const es_proto_s
 
     if (!strcasecmp(action, "transfer")) {
         const char *to = *es_json_str(root, "to") ? es_json_str(root, "to") : es_json_str(root, "extension");
-        int n = snprintf(arg, sizeof arg, "%s %s", uuid, to);
+        const char *dp = es_json_str(root, "dialplan");
+        const char *cx = es_json_str(root, "context");
+        int n;
+        if (!es_cmd_token_ok(to))        ES_CMD_BLOCK("rejected: transfer destination");
+        if (!es_cmd_dialplan_ok(dp))     ES_CMD_BLOCK("rejected: transfer dialplan"); /* blocks the `inline` app-exec */
+        if (*cx && !es_cmd_token_ok(cx)) ES_CMD_BLOCK("rejected: transfer context");
+        n = snprintf(arg, sizeof arg, "%s %s", uuid, to);
         if (n < 0 || n >= (int) sizeof arg) n = (int) sizeof arg - 1;   /* clamp against oversized fields */
-        if (*es_json_str(root, "dialplan")) n += snprintf(arg + n, sizeof arg - n, " %s", es_json_str(root, "dialplan"));
+        if (*dp) n += snprintf(arg + n, sizeof arg - n, " %s", dp);
         if (n < 0 || n >= (int) sizeof arg) n = (int) sizeof arg - 1;
-        if (*es_json_str(root, "context"))  snprintf(arg + n, sizeof arg - n, " %s", es_json_str(root, "context"));
+        if (*cx) snprintf(arg + n, sizeof arg - n, " %s", cx);
         snprintf(api, sizeof api, "uuid_transfer");
     } else if (!strcasecmp(action, "hangup")) {
         const char *c = es_json_str(root, "cause");
+        if (!es_cmd_text_ok(c)) ES_CMD_BLOCK("rejected: hangup cause");
         snprintf(api, sizeof api, "uuid_kill");
         snprintf(arg, sizeof arg, "%s %s", uuid, *c ? c : "NORMAL_CLEARING");
     } else if (!strcasecmp(action, "send_dtmf") || !strcasecmp(action, "dtmf")) {
+        const char *digits = es_json_str(root, "digits");
+        if (!es_cmd_token_ok(digits)) ES_CMD_BLOCK("rejected: dtmf digits");
         snprintf(api, sizeof api, "uuid_send_dtmf");
-        snprintf(arg, sizeof arg, "%s %s", uuid, es_json_str(root, "digits"));
+        snprintf(arg, sizeof arg, "%s %s", uuid, digits);
     } else if (!strcasecmp(action, "play") || !strcasecmp(action, "broadcast")) {
-        const char *leg = es_json_str(root, "leg");
+        const char *file = es_json_str(root, "file");
+        const char *leg  = es_json_str(root, "leg");
+        if (!es_cmd_token_ok(file)) ES_CMD_BLOCK("rejected: play file (app-exec/empty)");
+        if (!es_cmd_leg_ok(leg))    ES_CMD_BLOCK("rejected: play leg");
         snprintf(api, sizeof api, "uuid_broadcast");
-        snprintf(arg, sizeof arg, "%s %s %s", uuid, es_json_str(root, "file"), *leg ? leg : "aleg");
+        snprintf(arg, sizeof arg, "%s %s %s", uuid, file, *leg ? leg : "aleg");
     } else if (!strcasecmp(action, "stop_play") || !strcasecmp(action, "break")) {
         snprintf(api, sizeof api, "uuid_break");
         snprintf(arg, sizeof arg, "%s", uuid);
     } else if (!strcasecmp(action, "record")) {
         const char *state = es_json_str(root, "state");
+        const char *file  = es_json_str(root, "file");
+        if (*state && strcasecmp(state, "start") && strcasecmp(state, "stop") &&
+            strcasecmp(state, "mask") && strcasecmp(state, "unmask")) ES_CMD_BLOCK("rejected: record state");
+        if (!es_cmd_recpath_ok(file)) ES_CMD_BLOCK("rejected: record path (app-exec/traversal)");
         snprintf(api, sizeof api, "uuid_record");
-        snprintf(arg, sizeof arg, "%s %s %s", uuid, *state ? state : "start", es_json_str(root, "file"));
+        snprintf(arg, sizeof arg, "%s %s %s", uuid, *state ? state : "start", file);
     } else if (!strcasecmp(action, "setvar")) {
+        const char *name  = es_json_str(root, "name");
+        const char *value = es_json_str(root, "value");
+        /* A name denylist cannot secure setvar: identifier-clean variables like
+         * transfer_after_bridge reach the `inline` dialplan (RCE) through their VALUE. So the
+         * settable names are an operator allowlist (setvars=), fail-closed when unset. */
+        if (!es_cmd_varname_ok(name))                    ES_CMD_BLOCK("rejected: setvar name");
+        if (!es_cmd_name_in_list(p->setvar_allow, name)) ES_CMD_BLOCK("rejected: setvar not in setvars= allowlist");
+        if (!es_cmd_text_ok(value))                      ES_CMD_BLOCK("rejected: setvar value");
         snprintf(api, sizeof api, "uuid_setvar");
-        snprintf(arg, sizeof arg, "%s %s %s", uuid, es_json_str(root, "name"), es_json_str(root, "value"));
+        snprintf(arg, sizeof arg, "%s %s %s", uuid, name, value);
     } else if (!strcasecmp(action, "hold")) {
         const char *state = es_json_str(root, "state");
         snprintf(api, sizeof api, "uuid_hold");
         if (!strcasecmp(state, "off") || !strcasecmp(state, "unhold")) snprintf(arg, sizeof arg, "off %s", uuid);
         else snprintf(arg, sizeof arg, "%s", uuid);
     } else if (!strcasecmp(action, "bridge")) {
+        const char *peer = es_json_str(root, "peer_uuid");
+        if (!es_cmd_token_ok(peer)) ES_CMD_BLOCK("rejected: bridge peer_uuid");
         snprintf(api, sizeof api, "uuid_bridge");
-        snprintf(arg, sizeof arg, "%s %s", uuid, es_json_str(root, "peer_uuid"));
+        snprintf(arg, sizeof arg, "%s %s", uuid, peer);
     } else if (!strcasecmp(action, "park")) {
         snprintf(api, sizeof api, "uuid_park");
         snprintf(arg, sizeof arg, "%s", uuid);
@@ -479,6 +517,8 @@ static void es_dispatch_command(es_proto_ctx_t *p, cJSON *root, const es_proto_s
     }
     sink->on_command(sink->user, action, api, arg, id);
 }
+
+#undef ES_CMD_BLOCK
 
 void es_proto_on_text(es_proto_ctx_t *p, const char *data, size_t len, const es_proto_sink_t *sink)
 {

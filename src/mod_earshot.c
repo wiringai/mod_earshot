@@ -48,9 +48,11 @@
     "\t\t[vad=on [vad_barge=on] [vad_notify=on] [vad_mode=-1..3] [vad_voice_ms=200] [vad_silence_ms=500]]\n" \
     "\t\t[interruptible=none|dtmf|speech|any] [ignore_backchannel=on] [sensitivity=low|medium|high]\n" \
     "\t\t[barge_min_ms=<n>] [barge_fade_ms=<n>]\n" \
-    "\t\t[dtmf=on] [mask=on] [commands=true] [metrics=<seconds>] [corr=auto|<id>] [auth=<token> | EARSHOT_AUTH var]\n" \
-    "\t\t[greeting=<file> | EARSHOT_GREETING var]  (caller context: EARSHOT_META -> X-Earshot-Meta header)\n" \
-    "\t  control channel (commands=true): agent sends {\"type\":\"command\",\"action\":...}\n" \
+    "\t\t[dtmf=on] [mask=on] [commands=true|<action,...>] [setvars=<name,...>] [metrics=<seconds>] [corr=auto|<id>]\n" \
+    "\t\t[auth=<token> | EARSHOT_AUTH var] [greeting=<file> | EARSHOT_GREETING var]  (caller context: EARSHOT_META header)\n" \
+    "\t  control channel: agent sends {\"type\":\"command\",\"action\":...}; commands=true grants all actions,\n" \
+    "\t  commands=play,hangup grants only those. Arguments are validated (app-exec/path/exec-var rejected).\n" \
+    "\t  setvar is fail-closed: only variable names listed in setvars=<name,...> may be set.\n" \
     "\t  actions: transfer|hangup|send_dtmf|play|stop_play|record|setvar|hold|bridge|park\n" \
     "<uuid> stop\n" \
     "<uuid> pause | resume | flush\n" \
@@ -98,7 +100,10 @@ typedef struct {
     char             id[64];       /* stream id for fan-out (empty = the default stream) */
     switch_bool_t    owns_dtmf_hook; /* this stream registered the session recv_dtmf hook */
     char             auth[512];
-    switch_bool_t    allow_commands; /* control channel opt-in (commands=true) */
+    switch_bool_t    allow_commands; /* control channel opt-in (commands=true|<action,...>) */
+    switch_bool_t    cmd_allow_all;  /* commands=true: every action allowed */
+    char             cmd_allow[256]; /* commands=<csv>: only these actions allowed */
+    char             setvar_allow[256]; /* setvars=<csv>: variable names the setvar action may set */
     switch_bool_t    dtmf_on;       /* capture caller DTMF -> events + agent */
     switch_bool_t    masking;       /* PCI window: mute caller audio + suppress DTMF to the agent */
     uint64_t         dtmf_count;    /* caller DTMF digits seen (metric) */
@@ -336,7 +341,19 @@ static switch_bool_t es_apply_option(es_stream_t *st, const char *kv)
     } else if (!strcasecmp(key, "mask")) {
         st->masking = (switch_bool_t) switch_true(val);         /* start in a masking window */
     } else if (!strcasecmp(key, "commands")) {
-        st->allow_commands = (switch_bool_t) switch_true(val);  /* control channel opt-in */
+        if (switch_true(val)) {                                 /* commands=true: all actions (back-compat) */
+            st->allow_commands = SWITCH_TRUE;
+            st->cmd_allow_all  = SWITCH_TRUE;
+        } else if (val && *val && strcasecmp(val, "false") && strcasecmp(val, "off") &&
+                   strcasecmp(val, "no") && strcasecmp(val, "0")) {   /* commands=play,hangup: only these */
+            st->allow_commands = SWITCH_TRUE;
+            st->cmd_allow_all  = SWITCH_FALSE;
+            switch_copy_string(st->cmd_allow, val, sizeof st->cmd_allow);
+        } else {
+            st->allow_commands = SWITCH_FALSE;                  /* commands=false / off / absent */
+        }
+    } else if (!strcasecmp(key, "setvars")) {
+        switch_copy_string(st->setvar_allow, val, sizeof st->setvar_allow); /* setvar name allowlist */
     } else if (!strcasecmp(key, "metrics")) {
         st->metrics_interval = atoi(val);       /* seconds between earshot::metrics events */
     } else if (!strcasecmp(key, "id")) {
@@ -479,9 +496,39 @@ static void es_sink_transcript(void *user, const char *text, int is_final)
     switch_event_fire(&event);
 }
 
+/* Comma-list membership (case-insensitive, whitespace-tolerant) for commands=<csv>. */
+static int es_csv_has(const char *csv, const char *item)
+{
+    size_t il = item ? strlen(item) : 0;
+    const char *p = csv;
+    if (!il) return 0;
+    while (p && *p) {
+        size_t seg, t;
+        while (*p == ',' || *p == ' ') p++;
+        seg = strcspn(p, ",");
+        t = seg;
+        while (t && p[t - 1] == ' ') t--;                 /* trim trailing spaces in the segment */
+        if (t == il && !strncasecmp(p, item, il)) return 1;
+        p += seg;
+        if (*p == ',') p++;
+    }
+    return 0;
+}
+
+/* Whether this stream's commands= grant permits a given action. Note this is authorization
+ * (which action), NOT argument safety — the argument validation lives in es_dispatch_command
+ * (es_cmdguard), because the uuid_* whitelist is not a security boundary on its own. */
+static int es_action_permitted(es_stream_t *st, const char *action)
+{
+    if (!st->allow_commands) return 0;
+    if (st->cmd_allow_all)   return 1;
+    return action && es_csv_has(st->cmd_allow, action);
+}
+
 /* control channel: run the whitelisted uuid_* API on the caller's channel. Runs on the ws
  * thread; the uuid_* APIs locate the session themselves (the event-socket pattern). Gated by
- * commands=true so an agent can't drive the call unless the dialplan opted in. */
+ * commands= so an agent can't drive the call unless the dialplan opted in, per-action, and
+ * with every argument validated (es_cmdguard) before it can reach switch_api_execute. */
 static void es_sink_command(void *user, const char *action, const char *api, const char *arg, const char *id)
 {
     es_stream_t *st = (es_stream_t *) user;
@@ -490,8 +537,8 @@ static void es_sink_command(void *user, const char *action, const char *api, con
     const char *err = NULL;
     char resp[512];
 
-    if (!st->allow_commands) err = "disabled";
-    else if (!api)           err = "unsupported";
+    if (!es_action_permitted(st, action)) err = "disabled";
+    else if (!api)                        err = (arg && *arg) ? arg : "unsupported"; /* arg carries the block reason */
 
     if (!err && !strcasecmp(api, "__mask__")) {        /* earshot-internal, not a FreeSWITCH API */
         st->masking = (switch_bool_t) switch_true(arg);
@@ -787,6 +834,7 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
         st->proto_ctx = es_proto_create(st->proto, st->codec, st->rate, chan_rate, st->corr,
                                         switch_core_session_get_uuid(session),
                                         switch_channel_get_variable(channel, "EARSHOT_SESSION_CONFIG"));
+        es_proto_set_setvar_allow(st->proto_ctx, st->setvar_allow);  /* borrowed; st outlives the ctx */
 
         /* module-side VAD runs on the channel-rate read stream */
         if (st->vad_on && (st->vad = switch_vad_init(chan_rate, 1))) {

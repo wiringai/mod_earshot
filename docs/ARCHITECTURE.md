@@ -59,6 +59,11 @@ A sketch of the internals, so contributors (and future-you) know where things li
   and speech-triggered barge-in; also the clock for per-turn response latency.
 - **Control channel** — inbound `{"type":"command",…}` maps to whitelisted `uuid_*` APIs via
   `switch_api_execute` on the WS thread (the event-socket pattern), audited via `earshot::command`.
+  The action whitelist is **not** the security boundary on its own — `uuid_broadcast`/`uuid_transfer`/
+  `uuid_setvar` can execute apps or trigger hooks given hostile arguments — so every argument is
+  validated first (`es_cmdguard`: rejects the `app::args` exec form, `inline` dialplan, `..` traversal,
+  and `execute_on_`/`api_on_` variables), and `commands=` is a **per-action** allowlist
+  (`commands=play,hangup`), off by default.
 - **DTMF + masking** — a session `recv_dtmf` hook (registered once, on the default stream) forwards
   digits to the agent, or, during a masking window, mutes caller audio and redacts DTMF (PCI).
 - **Metrics** — counters (frames/bytes, drops, speech, dtmf, latency KPIs) emitted as `earshot::metrics`
