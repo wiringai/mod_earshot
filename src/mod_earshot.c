@@ -137,6 +137,7 @@ typedef struct {
     es_proto_sink_t  sink;          /* inbound-message sink -> play_buf/flush/marks */
     switch_buffer_t *play_buf;      /* agent audio (decoded L16) awaiting playback */
     switch_mutex_t  *play_mutex;    /* guards play_buf: es_ws thread writes, media thread reads */
+    switch_mutex_t  *cmd_ws_mutex;  /* serializes a command worker's echo (es_ws_send_text) against CLOSE's es_ws_destroy */
     switch_queue_t  *marks;         /* pending Twilio marks to echo once playback drains */
 
     /* welcome greeting: a file preloaded at channel rate, dropped into the playout the moment
@@ -525,59 +526,180 @@ static int es_action_permitted(es_stream_t *st, const char *action)
     return action && es_csv_has(st->cmd_allow, action);
 }
 
-/* control channel: run the whitelisted uuid_* API on the caller's channel. Runs on the ws
- * thread; the uuid_* APIs locate the session themselves (the event-socket pattern). Gated by
- * commands= so an agent can't drive the call unless the dialplan opted in, per-action, and
- * with every argument validated (es_cmdguard) before it can reach switch_api_execute. */
+/* ---- control-channel command worker pool ------------------------------------
+ * switch_api_execute (uuid_transfer/bridge/record/broadcast, ...) can block, and
+ * es_sink_command runs on the SHARED es_ws pool service thread that drives many
+ * streams. Running a blocking API there stalls audio for every co-located call.
+ * So blocking APIs are handed to a small worker pool; the service thread only
+ * copies the job and enqueues. Fast/stateful cases (permission errors, __mask__)
+ * stay inline since they never block.
+ *
+ * Each worker owns its own queue and a job is routed by channel-uuid hash, so all
+ * commands for one call land on the same worker and keep their submission order
+ * (the old synchronous path was ordered) while different calls run in parallel. */
+#define ES_CMD_WORKERS   4
+#define ES_CMD_QUEUE_MAX 1024
+
+typedef struct es_cmd_job {
+    char uuid[64];        /* channel uuid: runs the API and re-locates the stream for the echo */
+    char corr[256];       /* correlation id (audit) */
+    char stream_id[64];   /* st->id, to rebuild the channel-private key for the echo */
+    char action[64];
+    char api[32];
+    char cmd_id[256];     /* command id echoed back to the agent */
+    char arg[1024];
+} es_cmd_job_t;
+
+typedef struct es_cmd_worker { switch_queue_t *q; switch_thread_t *thread; } es_cmd_worker_t;
+static es_cmd_worker_t g_cmd_workers[ES_CMD_WORKERS];
+static int             g_cmd_worker_n = 0;
+static volatile int    g_cmd_shutdown = 0;   /* set at shutdown: workers drain-and-free without executing */
+static es_cmd_job_t    g_cmd_stop;           /* sentinel pushed per queue to terminate its worker */
+
+/* Route a call's commands to a stable worker so they stay ordered per call (djb2 over uuid). */
+static int es_cmd_slot(const char *uuid)
+{
+    unsigned h = 5381;
+    const unsigned char *p = (const unsigned char *) uuid;
+    while (p && *p) h = ((h << 5) + h) + *p++;
+    return (int) (h % (unsigned) g_cmd_worker_n);
+}
+
+/* Fire the earshot::command audit event. Not stream-bound (copied strings), so it is safe
+ * to call from the worker after the owning stream may already have torn down. */
+static void es_cmd_audit(const char *uuid, const char *corr, const char *action, const char *api,
+                         const char *err, switch_status_t rc, const char *result)
+{
+    switch_event_t *ev = NULL;
+    if (switch_event_create_subclass(&ev, SWITCH_EVENT_CUSTOM, EARSHOT_EVENT_COMMAND) != SWITCH_STATUS_SUCCESS)
+        return;
+    switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "Unique-ID", uuid ? uuid : "");
+    switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "corr", corr ? corr : "");
+    switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "action", action ? action : "");
+    if (api) switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "api", api);
+    switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "ok",
+                                   (!err && rc == SWITCH_STATUS_SUCCESS) ? "true" : "false");
+    if (err) switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "error", err);
+    else if (result) switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "result", result);
+    switch_event_fire(&ev);
+}
+
+/* Echo a command_result to the agent over the ws (es_ws_send_text only enqueues, so this is
+ * thread-safe). Caller must hold a live reference to ws (inline: st alive; worker: session lock). */
+static void es_cmd_echo(es_ws_t *ws, const char *id, const char *action, const char *err, switch_status_t rc)
+{
+    char resp[512];
+    if (!ws) return;
+    if (err)
+        snprintf(resp, sizeof resp, "{\"type\":\"command_result\",\"id\":\"%s\",\"action\":\"%s\",\"ok\":false,\"error\":\"%s\"}",
+                 id ? id : "", action ? action : "", err);
+    else
+        snprintf(resp, sizeof resp, "{\"type\":\"command_result\",\"id\":\"%s\",\"action\":\"%s\",\"ok\":%s}",
+                 id ? id : "", action ? action : "", rc == SWITCH_STATUS_SUCCESS ? "true" : "false");
+    es_ws_send_text(ws, resp, strlen(resp));
+}
+
+/* Worker side: run the (possibly blocking) API, then audit + echo. The owning stream may have
+ * torn down while the API ran, so:
+ *  - the audit event carries only copied strings (safe from any thread);
+ *  - the echo re-locates the stream fresh: switch_core_session_locate pins the session pool (so
+ *    st, which lives there, can't vanish), then st->cmd_ws_mutex fences the send against CLOSE's
+ *    es_ws_destroy -- the ws is a heap object CLOSE frees independently of the session lock, so
+ *    the read-lock alone does NOT make st->ws safe. If CLOSE already ran, st->ws is NULL -> skip.
+ * A self-terminating command (hangup/transfer) tears its own call down, so by the time we relocate
+ * the session is gone (or private cleared) and no command_result is echoed -- expected. */
+static void es_cmd_run(es_cmd_job_t *j)
+{
+    switch_stream_handle_t stream = { 0 };
+    switch_core_session_t *sess;
+    switch_status_t rc;
+    SWITCH_STANDARD_STREAM(stream);
+    rc = switch_api_execute(j->api, j->arg, NULL, &stream);
+    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "earshot command: %s %s -> %s\n",
+                      j->api, j->arg, stream.data ? (char *) stream.data : "");
+    es_cmd_audit(j->uuid, j->corr, j->action, j->api, NULL, rc, (char *) stream.data);
+    if ((sess = switch_core_session_locate(j->uuid))) {
+        es_stream_t *st = (es_stream_t *) switch_channel_get_private(
+                              switch_core_session_get_channel(sess), es_privkey(sess, j->stream_id));
+        if (st) {
+            switch_mutex_lock(st->cmd_ws_mutex);
+            if (st->ws) es_cmd_echo(st->ws, j->cmd_id, j->action, NULL, rc);
+            switch_mutex_unlock(st->cmd_ws_mutex);
+        }
+        switch_core_session_rwunlock(sess);
+    }
+    switch_safe_free(stream.data);
+}
+
+static void *SWITCH_THREAD_FUNC es_cmd_worker_thread(switch_thread_t *thread, void *obj)
+{
+    switch_queue_t *q = (switch_queue_t *) obj;
+    void *popped;
+    (void) thread;
+    while (switch_queue_pop(q, &popped) == SWITCH_STATUS_SUCCESS) {
+        es_cmd_job_t *j = (es_cmd_job_t *) popped;
+        if (j == &g_cmd_stop) break;              /* shutdown sentinel */
+        if (!j) continue;
+        if (g_cmd_shutdown) { free(j); continue; } /* draining: free the rest without running APIs */
+        es_cmd_run(j);
+        free(j);
+    }
+    return NULL;
+}
+
+/* control channel: validate + dispatch a whitelisted uuid_* API. Runs on the SHARED es_ws pool
+ * service thread, so the blocking part (switch_api_execute) is handed to the command worker pool
+ * -- the service thread must never block, it drives many streams. Fast cases (permission errors,
+ * blocked args, __mask__) are handled inline since they never block. Gated by commands=, per
+ * action, with every argument already validated (es_cmdguard) before it can reach the API.
+ * Note __mask__ applies inline and immediately -- deliberately, so the PCI mute takes effect with
+ * lowest latency rather than queuing behind a slow uuid_bridge; it is therefore not ordered
+ * against queued APIs the agent sent around it (queued APIs keep their order among themselves). */
 static void es_sink_command(void *user, const char *action, const char *api, const char *arg, const char *id)
 {
     es_stream_t *st = (es_stream_t *) user;
-    switch_stream_handle_t stream = { 0 };
-    switch_status_t rc = SWITCH_STATUS_FALSE;
-    const char *err = NULL;
-    char resp[512];
+    es_cmd_job_t *j;
 
-    if (!es_action_permitted(st, action)) err = "disabled";
-    else if (!api)                        err = (arg && *arg) ? arg : "unsupported"; /* arg carries the block reason */
-
-    if (!err && !strcasecmp(api, "__mask__")) {        /* earshot-internal, not a FreeSWITCH API */
+    if (!es_action_permitted(st, action)) {
+        es_cmd_audit(st->uuid, st->corr, action, api, "disabled", SWITCH_STATUS_FALSE, NULL);
+        es_cmd_echo(st->ws, id, action, "disabled", SWITCH_STATUS_FALSE);
+        return;
+    }
+    if (!api) {   /* unrecognized action, or blocked by es_cmdguard (reason carried in arg) */
+        const char *err = (arg && *arg) ? arg : "unsupported";
+        es_cmd_audit(st->uuid, st->corr, action, NULL, err, SWITCH_STATUS_FALSE, NULL);
+        es_cmd_echo(st->ws, id, action, err, SWITCH_STATUS_FALSE);
+        return;
+    }
+    if (!strcasecmp(api, "__mask__")) {   /* earshot-internal, non-blocking: handle inline */
         st->masking = (switch_bool_t) switch_true(arg);
         st->commands++;
-        rc = SWITCH_STATUS_SUCCESS;
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "earshot: masking %s (agent)\n", st->masking ? "ON" : "OFF");
-    } else if (!err) {
-        SWITCH_STANDARD_STREAM(stream);
-        rc = switch_api_execute(api, arg, NULL, &stream);
+        es_cmd_audit(st->uuid, st->corr, action, "__mask__", NULL, SWITCH_STATUS_SUCCESS, NULL);
+        es_cmd_echo(st->ws, id, action, NULL, SWITCH_STATUS_SUCCESS);
+        return;
+    }
+
+    /* a real uuid_* API may block -> hand it to the worker pool, keep this (service) thread free */
+    if (g_cmd_worker_n <= 0 || !(j = (es_cmd_job_t *) malloc(sizeof *j))) {
+        es_cmd_audit(st->uuid, st->corr, action, api, "unavailable", SWITCH_STATUS_FALSE, NULL);
+        es_cmd_echo(st->ws, id, action, "unavailable", SWITCH_STATUS_FALSE);
+        return;
+    }
+    switch_copy_string(j->uuid, st->uuid, sizeof j->uuid);
+    switch_copy_string(j->corr, st->corr, sizeof j->corr);
+    switch_copy_string(j->stream_id, st->id, sizeof j->stream_id);
+    switch_copy_string(j->action, action ? action : "", sizeof j->action);
+    switch_copy_string(j->api, api, sizeof j->api);
+    switch_copy_string(j->arg, arg ? arg : "", sizeof j->arg);
+    switch_copy_string(j->cmd_id, id ? id : "", sizeof j->cmd_id);
+    if (switch_queue_trypush(g_cmd_workers[es_cmd_slot(st->uuid)].q, j) == SWITCH_STATUS_SUCCESS) {
         st->commands++;
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-                          "earshot command: %s %s -> %s\n", api, arg, stream.data ? (char *) stream.data : "");
+    } else {                                   /* bounded queue: reject on overload rather than block */
+        free(j);
+        es_cmd_audit(st->uuid, st->corr, action, api, "busy", SWITCH_STATUS_FALSE, NULL);
+        es_cmd_echo(st->ws, id, action, "busy", SWITCH_STATUS_FALSE);
     }
-
-    {   /* audit event (not channel-bound; we're on the ws thread) */
-        switch_event_t *ev = NULL;
-        if (switch_event_create_subclass(&ev, SWITCH_EVENT_CUSTOM, EARSHOT_EVENT_COMMAND) == SWITCH_STATUS_SUCCESS) {
-            switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "Unique-ID", st->uuid);
-            switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "corr", st->corr);
-            switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "action", action ? action : "");
-            if (api) switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "api", api);
-            switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "ok",
-                                           (!err && rc == SWITCH_STATUS_SUCCESS) ? "true" : "false");
-            if (err) switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "error", err);
-            else if (stream.data) switch_event_add_header_string(ev, SWITCH_STACK_BOTTOM, "result", (char *) stream.data);
-            switch_event_fire(&ev);
-        }
-    }
-
-    if (st->ws) {   /* echo a result back to the agent */
-        if (err)
-            snprintf(resp, sizeof resp, "{\"type\":\"command_result\",\"id\":\"%s\",\"action\":\"%s\",\"ok\":false,\"error\":\"%s\"}",
-                     id ? id : "", action ? action : "", err);
-        else
-            snprintf(resp, sizeof resp, "{\"type\":\"command_result\",\"id\":\"%s\",\"action\":\"%s\",\"ok\":%s}",
-                     id ? id : "", action ? action : "", rc == SWITCH_STATUS_SUCCESS ? "true" : "false");
-        es_ws_send_text(st->ws, resp, strlen(resp));
-    }
-    switch_safe_free(stream.data);
 }
 
 /* ---- WebSocket callbacks (run on the es_ws service thread) ------------- */
@@ -738,7 +860,9 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
         }
         if (st->ws) {
             es_proto_send_stop(st->proto_ctx, st->ws);         /* best-effort postamble */
+            switch_mutex_lock(st->cmd_ws_mutex);               /* fence out any in-flight command-worker echo */
             es_ws_destroy(st->ws); st->ws = NULL;              /* joins ws thread first */
+            switch_mutex_unlock(st->cmd_ws_mutex);
         }
         if (st->proto_ctx) { es_proto_destroy(st->proto_ctx); st->proto_ctx = NULL; }
         if (st->vad) switch_vad_destroy(&st->vad);
@@ -864,6 +988,7 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
     /* playback buffer for agent audio (byte-granular so WRITE_REPLACE pulls exact frames);
      * read-only forks (dir=in) never play back, so they don't allocate one */
     switch_mutex_init(&st->play_mutex, SWITCH_MUTEX_NESTED, pool);
+    switch_mutex_init(&st->cmd_ws_mutex, SWITCH_MUTEX_NESTED, pool);
     if (st->bug_flags & SMBF_WRITE_REPLACE)
         switch_buffer_create_dynamic(&st->play_buf, 1024, 8192, 0);
 
@@ -1212,12 +1337,41 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_earshot_load)
     switch_console_set_complete("add earshot ::console::list_uuid start");
     switch_console_set_complete("add earshot ::console::list_uuid stop");
 
+    /* control-channel command worker pool: keeps the shared ws service thread non-blocking */
+    {
+        int i;
+        for (i = 0; i < ES_CMD_WORKERS; i++) {
+            switch_threadattr_t *ta = NULL;
+            if (switch_queue_create(&g_cmd_workers[i].q, ES_CMD_QUEUE_MAX, pool) != SWITCH_STATUS_SUCCESS)
+                break;
+            switch_threadattr_create(&ta, pool);
+            switch_threadattr_stacksize_set(ta, SWITCH_THREAD_STACKSIZE);
+            if (switch_thread_create(&g_cmd_workers[i].thread, ta, es_cmd_worker_thread, g_cmd_workers[i].q, pool) != SWITCH_STATUS_SUCCESS)
+                break;
+            g_cmd_worker_n++;
+        }
+    }
+
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_earshot loaded\n");
     return SWITCH_STATUS_SUCCESS;
 }
 
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_earshot_shutdown)
 {
+    {   /* stop the command workers before unmap: signal drain, push a sentinel per queue, join.
+         * The worker frees every job it pops (including those it drains), so nothing leaks; a
+         * worker busy in switch_api_execute finishes it, then pops the sentinel and exits. */
+        int i;
+        g_cmd_shutdown = 1;
+        g_cmd_worker_n = 0;   /* close the enqueue guard first: late commands are rejected, not queued behind the sentinel */
+        for (i = 0; i < ES_CMD_WORKERS; i++)
+            if (g_cmd_workers[i].q) switch_queue_push(g_cmd_workers[i].q, &g_cmd_stop);
+        for (i = 0; i < ES_CMD_WORKERS; i++)
+            if (g_cmd_workers[i].thread) {
+                switch_status_t tst;
+                switch_thread_join(&tst, g_cmd_workers[i].thread);
+            }
+    }
     es_ws_global_shutdown();   /* join the shared WS service-thread pool before we're unmapped */
     switch_event_free_subclass(EARSHOT_EVENT_CONNECTED);
     switch_event_free_subclass(EARSHOT_EVENT_DISCONNECTED);
