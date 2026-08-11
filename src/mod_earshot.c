@@ -1106,7 +1106,23 @@ static switch_status_t es_simple(switch_core_session_t *session, const char *ver
 /* --------------------------------------------------------------------------
  * API + APP entry points
  * -------------------------------------------------------------------------- */
-#define ES_MAX_ARGV 16
+/* Room for `<uuid> start <url>` plus every documented start-time option (~25) with margin.
+ * switch_separate_string dumps any tokens past the array bound into the LAST slot, so an
+ * over-long option list would silently mis-parse (e.g. vad= swallowing "on vad_barge=on
+ * metrics=10"); 48 keeps realistic invocations well clear of the bound. */
+#define ES_MAX_ARGV 48
+
+/* switch_separate_string wrapper that warns when the token list hits the array bound (so the
+ * merged-remainder mis-parse above is diagnosable in the log instead of failing silently). */
+static int es_split_argv(char *buf, char **argv)
+{
+    int argc = switch_separate_string(buf, ' ', argv, ES_MAX_ARGV);
+    if (argc >= ES_MAX_ARGV)
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                          "earshot: command hit the %d-token parse limit; trailing tokens were merged into the "
+                          "last field and may not apply -- split the command or raise ES_MAX_ARGV\n", ES_MAX_ARGV);
+    return argc;
+}
 
 /* Return the substring of `s` after skipping `n` space-delimited tokens (for
  * verbs whose payload is free text, e.g. `send <json>`). Never returns NULL. */
@@ -1192,7 +1208,7 @@ SWITCH_STANDARD_API(earshot_api_function)
     switch_status_t status = SWITCH_STATUS_FALSE;
 
     if (zstr(cmd) || !(mycmd = strdup(cmd))) { stream->write_function(stream, "-ERR usage: %s\n", EARSHOT_SYNTAX); return SWITCH_STATUS_SUCCESS; }
-    argc = switch_separate_string(mycmd, ' ', argv, ES_MAX_ARGV);
+    argc = es_split_argv(mycmd, argv);
     if (argc < 2) { stream->write_function(stream, "-ERR usage: %s\n", EARSHOT_SYNTAX); goto done; }
 
     if (!(target = switch_core_session_locate(argv[0]))) {
@@ -1230,7 +1246,7 @@ SWITCH_STANDARD_APP(earshot_app_function)
     SWITCH_STANDARD_STREAM(stream);
     full = switch_core_session_sprintf(session, "%s %s",
                switch_core_session_get_uuid(session), zstr(data) ? "" : data);
-    argc = switch_separate_string(full, ' ', argv, ES_MAX_ARGV);
+    argc = es_split_argv(full, argv);
     if (argc >= 2 && !strcasecmp(argv[1], "start")) {
         es_start(session, argc, argv, &stream);
     } else if (argc >= 2) {
@@ -1252,7 +1268,7 @@ SWITCH_STANDARD_API(uas_api_function)   /* uuid_audio_stream <uuid> <verb> ... *
     switch_core_session_t *target = NULL;
 
     if (zstr(cmd) || !(mycmd = strdup(cmd))) { stream->write_function(stream, "-ERR usage: uuid_audio_stream <uuid> start <url> <mix> <rate>\n"); return SWITCH_STATUS_SUCCESS; }
-    argc = switch_separate_string(mycmd, ' ', argv, ES_MAX_ARGV);
+    argc = es_split_argv(mycmd, argv);
     if (argc < 2)                        { stream->write_function(stream, "-ERR usage: uuid_audio_stream <uuid> start <url> <mix> <rate>\n"); goto done; }
     if (!(target = switch_core_session_locate(argv[0]))) { stream->write_function(stream, "-ERR no such session %s\n", argv[0]); goto done; }
     es_compat(target, argc, argv, cmd, stream);
@@ -1273,7 +1289,7 @@ SWITCH_STANDARD_APP(audio_stream_app_function)   /* <action application="audio_s
     SWITCH_STANDARD_STREAM(stream);
     full = switch_core_session_sprintf(session, "%s %s",
                switch_core_session_get_uuid(session), zstr(data) ? "" : data);
-    argc = switch_separate_string(full, ' ', argv, ES_MAX_ARGV);
+    argc = es_split_argv(full, argv);
     if (argc >= 2) es_compat(session, argc, argv, full, &stream);
     switch_safe_free(stream.data);
 }
