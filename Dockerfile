@@ -15,6 +15,7 @@ ARG SW_TOKEN=""
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake pkg-config git ca-certificates gnupg curl \
       libwebsockets-dev libopus-dev libsoxr-dev \
+      file dpkg-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # FreeSWITCH dev headers (optional — skipped without a SignalWire token; the module
@@ -43,6 +44,9 @@ RUN set -eux; \
       (cd build && cpack -G DEB && cp mod-earshot_*.deb /out/) || true; \
     fi
 
-# Minimal artifact stage: `docker cp` /out out of a container made from this image.
-FROM scratch AS artifacts
+# Artifact stage: `docker cp` /out out of a container made from this image. Uses debian
+# (not scratch) so `docker create` has a command to instantiate — a scratch image has none
+# ("Error response from daemon: no command specified"). The base layer is already cached
+# from the build stage, so this adds no pull.
+FROM debian:12-slim AS artifacts
 COPY --from=build /out /out
