@@ -475,7 +475,7 @@ static void *es_pool_service(void *arg)
                     lws_callback_on_writable(w->wsi);
                 }
             } else if (!w->connected && !w->wsi && w->o.reconnect && now >= w->next_reconnect_ms) {
-                int jitter = (int) (w->rng = w->rng * 1103515245u + 12345u) % (w->backoff_ms / 2 + 1);
+                int jitter = (int) ((w->rng = w->rng * 1103515245u + 12345u) % (unsigned) (w->backoff_ms / 2 + 1));
                 w->kill = 0;   /* a liveness drop set this; clear it so the new wsi survives */
                 w->next_reconnect_ms = now + w->backoff_ms + jitter;   /* non-blocking backoff */
                 if (w->backoff_ms < 8000) w->backoff_ms *= 2;
