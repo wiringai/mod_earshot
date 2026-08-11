@@ -468,7 +468,10 @@ static void es_sink_mark(void *user, const char *name)
 {
     es_stream_t *st = (es_stream_t *) user;
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "earshot: queued mark '%s'\n", name ? name : "");
-    if (st->marks && name) switch_queue_trypush(st->marks, strdup(name));
+    if (st->marks && name) {
+        char *m = strdup(name);   /* consumer (WRITE_REPLACE / CLOSE) frees it; free here if the 64-deep queue is full */
+        if (m && switch_queue_trypush(st->marks, m) != SWITCH_STATUS_SUCCESS) free(m);
+    }
 }
 
 /* agent-signalled DTMF (e.g. Deepgram): the caller's own DTMF is audited via earshot::dtmf on
@@ -1188,9 +1191,13 @@ static switch_status_t es_compat(switch_core_session_t *session, int argc, char 
     if (!strcasecmp(verb, "start")) {
         char *nargv[ES_MAX_ARGV] = { 0 };
         const char *url  = argc > 2 ? argv[2] : "";
-        const char *rate = argc > 4 ? argv[4] : "8k";   /* mod_audio_stream <mix> (argv[3]) has no earshot equivalent */
+        const char *mix  = argc > 3 ? argv[3] : "";      /* mod_audio_stream <mix>: mono|mixed|stereo */
+        const char *rate = argc > 4 ? argv[4] : "8k";
         int hz = atoi(rate);
         int n = 0;
+        if (mix && (!strcasecmp(mix, "stereo") || !strcasecmp(mix, "mixed")))   /* earshot streams one mono track only */
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                              "earshot: audio_stream mix-type '%s' is not supported; streaming mono\n", mix);
         if (strchr(rate, 'k') || strchr(rate, 'K')) hz *= 1000;
         if (hz <= 0) hz = 8000;
         nargv[n++] = argv[0];

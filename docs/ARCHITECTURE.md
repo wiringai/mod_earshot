@@ -75,6 +75,21 @@ On handshake (unless `corr=<id>` is given) Earshot injects `X-Call-ID`, `X-Chann
 `X-Correlation-ID`, so the agent joins the two-key model (SIP Call-ID ↔ channel UUID) the rest of the
 observability stack uses. Twilio also carries these in `start.customParameters`.
 
+## Memory & capacity
+
+Per-stream and per-session buffers dominate steady-state RAM — size a host by them, not by CPU:
+
+- **Play buffer — up to `ES_PLAY_BUF_MAX` (2 MB) per stream.** Agent audio is buffered here awaiting
+  playback; writes stop accepting once it reaches the cap (frames drop rather than grow unbounded), so
+  2 MB is the worst case per active stream. Read-only forks (`dir=in`) allocate none.
+- **Greeting PCM — up to ~1.4 MB per session.** A `greeting=` file is preloaded as L16 mono at the
+  channel rate, bounded by `ES_GREETING_MAX_MS` (15 s); at a 48 kHz channel that is 48000 × 15 × 2 ≈
+  1.4 MB (≈ 0.24 MB at 8 kHz). Sessions without a greeting allocate none.
+
+At the worst case both apply at once, so budget roughly **3–3.4 MB per concurrent session** for these
+buffers alone (plus the WS send queue and codec scratch). At 5 000 concurrent that is on the order of
+**15–17 GB** — plan headroom accordingly, or lower `ES_GREETING_MAX_MS` / drop greetings to cut it.
+
 ## Why these choices
 
 - **No socket I/O on the media thread** is the single most important rule — a slow or dead agent
