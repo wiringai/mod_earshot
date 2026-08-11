@@ -903,7 +903,15 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
     st->vad_mode = 2; st->vad_voice_ms = 200; st->vad_silence_ms = 500;   /* telephony defaults */
     st->start_time = st->last_metrics = switch_micro_time_now();
 
-    for (i = 3; i < argc; i++) es_apply_option(st, argv[i]);
+    for (i = 3; i < argc; i++) {
+        const char *eq;
+        if (zstr(argv[i]) || es_apply_option(st, argv[i])) continue;   /* empty or consumed */
+        if (!(eq = strchr(argv[i], '='))) continue;   /* no '=': a split value fragment (e.g. the tail of
+                                                       * auth=Bearer <token>) or junk — don't warn or log it */
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,   /* log only the key, never the value */
+                          "earshot: ignoring unrecognized start option '%.*s' (typo? see `earshot` usage)\n",
+                          (int) (eq - argv[i]), argv[i]);
+    }
 
     /* The option list is split on spaces, so an `auth=Bearer <token>` value would be
      * truncated to just "Bearer". EARSHOT_AUTH carries the full Authorization value
