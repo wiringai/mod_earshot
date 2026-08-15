@@ -5,6 +5,8 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-15
+
 ### Security
 - **Control-channel argument validation (control-channel RCE hardening).** The agent control
   channel translated `{"type":"command",...}` into `uuid_*` APIs with arguments taken verbatim from
@@ -26,6 +28,47 @@ All notable changes to Earshot (`mod_earshot`). Format follows
   `setvar` — identifier-clean variables such as `transfer_after_bridge` reach the `inline` dialplan
   (RCE) through their *value* when FreeSWITCH later space-splits it — so only variable names listed
   in `setvars=<name,...>` are settable, and none are settable by default.
+
+### Added
+- **Start-option robustness.** `ES_MAX_ARGV` raised 16 → 48 so the full documented option set
+  parses — previously any option past the 13th slot was silently merged into the last field and
+  mis-parsed (e.g. `vad=` swallowing `on vad_barge=on metrics=10`); the parser now also warns when
+  it hits the token limit.
+- **Unrecognized-option warning.** A mistyped start option (e.g. `vad_slience_ms=`) is now logged
+  instead of silently ignored. Only the option *key* is logged, never the value, so a typo'd
+  `auth=` cannot leak a token.
+- **mod_audio_stream mix-type warning.** The compat shim now warns when handed a `stereo`/`mixed`
+  mix-type it can't honor (Earshot streams a single mono track) instead of silently downmixing.
+- **Capacity documentation.** `docs/ARCHITECTURE.md` now states per-stream (play buffer, up to
+  2 MB) and per-session (greeting PCM, up to ~1.4 MB) memory so fleets are sized, not surprised.
+
+### Changed
+- **Control-channel commands run on a worker pool, not the WebSocket service thread.** A blocking
+  `uuid_*` API (`transfer`/`bridge`/`record`/`broadcast`) no longer stalls audio for the other
+  calls sharing that shared service thread; a call's commands keep their submission order (routed
+  to a stable worker by channel UUID).
+
+### Fixed
+- **Use-after-free in the command result echo.** A worker echoing a command result no longer races
+  the media-bug teardown that frees the stream's WebSocket — the echo re-locates the stream under a
+  session read-lock and is fenced against `es_ws_destroy` by a per-stream mutex.
+- **WebSocket receive path gated on `suppress_events`, not just `kill`.** On the orphan-teardown
+  timeout path a late inbound frame could reach a sink after the owner freed its play buffer; the
+  receive path now also bails on `suppress_events` (set synchronously when teardown starts).
+- **Negative reconnect jitter.** Backoff jitter is computed with an unsigned modulo; the previous
+  signed cast could go negative and pull the next reconnect slightly early.
+- **Mark-queue leak.** A Twilio mark name is freed when the 64-deep mark queue is full
+  (`switch_queue_trypush` does not take ownership on failure).
+
+### Internal
+- **The module now compiles on same-repo pull requests.** The FreeSWITCH build previously ran only
+  on push to `main`, so a compile break in `mod_earshot.c` could pass PR review and land on main; it
+  now builds against real FreeSWITCH on same-repo PRs (fork PRs still skip — no secret).
+- **`.deb` / module build job fixed.** `cpack -G DEB` gained `file`/`dpkg-dev`, and the artifact
+  stage is a real image (`docker create` could not instantiate the former `scratch` stage) — the job
+  now produces `mod_earshot.so` + a `.deb` for FS 1.10/1.11.
+- **Fuzzing for `es_proto_on_text`.** `test_command_dispatch` now feeds malformed/hostile JSON —
+  structural garbage must be ignored, command-shaped garbage must not crash — run under ASan/UBSan.
 
 ## [0.2.0] — 2026-08-06
 
@@ -133,6 +176,7 @@ status table in the README).
   found and fixed in peer review; covered by `test/test_pb.c`.
 - The control channel is **off by default**, opt-in per stream, and whitelisted to call-control APIs.
 
-[Unreleased]: https://github.com/wiringai/mod_earshot/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/wiringai/mod_earshot/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/wiringai/mod_earshot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/wiringai/mod_earshot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/wiringai/mod_earshot/releases/tag/v0.1.0
