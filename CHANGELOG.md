@@ -5,6 +5,21 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-03
+
+### Added
+- The `uuid_audio_stream` compat API now speaks the mod_audio_stream agent dialect, so
+  agents and controllers written for that module run unchanged behind Earshot:
+  `{"type":"streamAudio",...}` audio is played to the caller (L16 at the stated rate,
+  resampled to the channel rate when they differ); `{"control":{"command":...}}`
+  messages are surfaced as the `mod_audio_stream::json` event, with `clear` also
+  acting as a barge-in; `clear_playback` drops queued agent audio; the metadata after
+  `<rate>` is sent to the agent as the first text frame; connect failures and closes
+  are mirrored as `mod_audio_stream::error` / `mod_audio_stream::disconnect`.
+
+### Changed
+- README: removed the commercial support section.
+
 ## [0.3.0] — 2026-08-15
 
 ### Security
@@ -176,7 +191,8 @@ status table in the README).
   found and fixed in peer review; covered by `test/test_pb.c`.
 - The control channel is **off by default**, opt-in per stream, and whitelisted to call-control APIs.
 
-[Unreleased]: https://github.com/wiringai/mod_earshot/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/wiringai/mod_earshot/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/wiringai/mod_earshot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/wiringai/mod_earshot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/wiringai/mod_earshot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/wiringai/mod_earshot/releases/tag/v0.1.0
