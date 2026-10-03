@@ -673,6 +673,47 @@ void es_proto_on_text(es_proto_ctx_t *p, const char *data, size_t len, const es_
     e = (node && node->valuestring) ? node->valuestring : "";
     if (!*e) { node = cJSON_GetObjectItem(root, "event"); e = (node && node->valuestring) ? node->valuestring : ""; }
 
+    /* mod_audio_stream dialect, so an agent written for amigniter/mod_audio_stream works
+     * unchanged behind the uuid_audio_stream compat API:
+     *   {"type":"streamAudio","data":{"audioDataType":"raw","sampleRate":N,"audioData":b64}}
+     *     -> L16 at N Hz, played to the caller (resampled to the channel rate if needed)
+     *   {"control":{"command":"clear"|"pickCall"|"transfer",...}}
+     *     -> "clear" is a barge-in; every control message is also handed up verbatim
+     *        (sink->on_json) for the mod_audio_stream::json event controllers listen to. */
+    if (!strcasecmp(e, "streamAudio")) {
+        cJSON *d     = cJSON_GetObjectItem(root, "data");
+        cJSON *audio = d ? cJSON_GetObjectItem(d, "audioData") : NULL;
+        cJSON *kind  = d ? cJSON_GetObjectItem(d, "audioDataType") : NULL;
+        cJSON *rate  = d ? cJSON_GetObjectItem(d, "sampleRate") : NULL;
+        const char *k = (kind && kind->valuestring) ? kind->valuestring : "raw";
+        if (audio && audio->valuestring && !strcasecmp(k, "raw")) {
+            /* raw = L16 at data.sampleRate; rebuild the inbound resampler on a change,
+             * as the pipecat path does (rs_in is only touched on this receive thread). */
+            int hz = rate ? rate->valueint : 0;
+            if (hz > 0 && p->rate_out != hz) {
+                p->rate_out = hz;
+                if (p->rs_in) switch_resample_destroy(&p->rs_in);
+                if (p->rate_out != p->chan_rate)
+                    switch_resample_create(&p->rs_in, p->rate_out, p->chan_rate, 8192, SWITCH_RESAMPLE_QUALITY, 1);
+            }
+            es_deliver_ulaw_b64(p, audio->valuestring, ES_CODEC_L16, sink);
+        }
+        /* wav/mp3/ogg payloads are not decoded here: the compat path asks for raw L16 */
+        cJSON_Delete(root);
+        return;
+    }
+    {
+        cJSON *ctl = cJSON_GetObjectItem(root, "control");
+        if (ctl) {
+            cJSON *cmd = cJSON_GetObjectItem(ctl, "command");
+            if (cmd && cmd->valuestring && !strcasecmp(cmd->valuestring, "clear") && sink->on_clear)
+                sink->on_clear(sink->user);
+            if (sink->on_json) sink->on_json(sink->user, data);
+            cJSON_Delete(root);
+            return;
+        }
+    }
+
     if (!strcasecmp(e, "playAudio") || !strcasecmp(e, "media")) {
         cJSON *d = cJSON_GetObjectItem(root, "data");
         cJSON *m = cJSON_GetObjectItem(root, "media");

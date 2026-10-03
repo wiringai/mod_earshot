@@ -29,6 +29,12 @@
 #define EARSHOT_EVENT_SPEECH_STOP  "earshot::speech_stopped"
 #define EARSHOT_EVENT_DTMF         "earshot::dtmf"
 #define EARSHOT_EVENT_TRANSCRIPT   "earshot::transcript"
+/* mod_audio_stream dialect: fired IN ADDITION to the earshot::* events when a stream was
+ * started through the uuid_audio_stream compat API, so controllers written for
+ * amigniter/mod_audio_stream keep working unchanged. */
+#define MAS_EVENT_JSON        "mod_audio_stream::json"
+#define MAS_EVENT_DISCONNECT  "mod_audio_stream::disconnect"
+#define MAS_EVENT_ERROR       "mod_audio_stream::error"
 
 /* turn notifications sent to the agent (vad_notify=on) */
 #define ES_TURN_START "{\"type\":\"speech_started\"}"
@@ -146,6 +152,11 @@ typedef struct {
     int16_t         *greeting_pcm;          /* preloaded greeting, L16 mono @ chan_rate (pool-owned) */
     size_t           greeting_samples;      /* samples in greeting_pcm (0 = no greeting) */
     switch_bool_t    greeting_done;         /* already injected into play_buf */
+
+    /* uuid_audio_stream compat (mod_audio_stream dialect): mirror lifecycle events under the
+     * mod_audio_stream::* names and send the controller's metadata as the first text frame */
+    switch_bool_t    compat_mas;
+    char             compat_metadata[2048];
 
     /* metrics counters (tx = media thread; rx/drops = ws thread; racy reads are fine for stats) */
     uint64_t         tx_frames, tx_bytes;   /* caller -> agent */
@@ -453,6 +464,21 @@ static void es_sink_audio(void *user, const int16_t *pcm, size_t nsamples)
 }
 
 /* barge-in: drop any queued agent audio immediately (native clear / twilio clear). */
+/* A non-audio JSON message from the agent (control: pickCall / clear / transfer ...).
+ * Surfaced as mod_audio_stream::json with the text in both a JSON header and the body,
+ * which is how amigniter/mod_audio_stream delivers it and what controllers parse. */
+static void es_sink_json(void *user, const char *text)
+{
+    es_stream_t *st = (es_stream_t *) user;
+    switch_event_t *event = NULL;
+    if (!st || !st->compat_mas || !st->session || !text) return;
+    if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, MAS_EVENT_JSON) != SWITCH_STATUS_SUCCESS) return;
+    switch_channel_event_set_data(switch_core_session_get_channel(st->session), event);
+    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "JSON", text);
+    switch_event_add_body(event, "%s", text);
+    switch_event_fire(&event);
+}
+
 static void es_sink_clear(void *user)
 {
     es_stream_t *st = (es_stream_t *) user;
@@ -716,6 +742,10 @@ static void es_on_ws_event(void *user, int connected, int code, const char *reas
          * session handshake again (e.g. OpenAI session.update / Twilio start), otherwise a
          * reconnected agent is left unconfigured. */
         es_proto_send_start(st->proto_ctx, st->ws);
+        /* mod_audio_stream sends the caller's metadata as the first text frame; agents
+         * written for it (and their call records) expect call_id / caller / callee there. */
+        if (st->compat_mas && st->compat_metadata[0])
+            es_ws_send_text(st->ws, st->compat_metadata, strlen(st->compat_metadata));
         if (st->ready_mode == ES_READY_CONNECT) st->ready = SWITCH_TRUE;
     } else if (st->session) {
         /* code < 0 = connect/handshake failure, otherwise a normal close (incl. reconnect churn).
@@ -723,6 +753,9 @@ static void es_on_ws_event(void *user, int connected, int code, const char *reas
          * es_ws_destroy waits for the service thread to go quiescent before we free st. */
         es_fire_event(st->session, code < 0 ? EARSHOT_EVENT_ERROR : EARSHOT_EVENT_DISCONNECTED,
                       "reason", reason ? reason : "");
+        if (st->compat_mas)
+            es_fire_event(st->session, code < 0 ? MAS_EVENT_ERROR : MAS_EVENT_DISCONNECT,
+                          "reason", reason ? reason : "");
     }
 }
 
@@ -923,6 +956,17 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
         const char *a = switch_channel_get_variable(channel, "EARSHOT_AUTH");
         if (a && *a) switch_copy_string(st->auth, a, sizeof st->auth);
     }
+    /* set by the uuid_audio_stream compat shim for this start (then cleared) */
+    {
+        const char *m = switch_channel_get_variable(channel, "EARSHOT_COMPAT_MAS");
+        if (m && switch_true(m)) {
+            const char *md = switch_channel_get_variable(channel, "EARSHOT_COMPAT_METADATA");
+            st->compat_mas = SWITCH_TRUE;
+            if (md && *md) switch_copy_string(st->compat_metadata, md, sizeof st->compat_metadata);
+            switch_channel_set_variable(channel, "EARSHOT_COMPAT_MAS", NULL);
+            switch_channel_set_variable(channel, "EARSHOT_COMPAT_METADATA", NULL);
+        }
+    }
 
     /* correlation-first: default corr = SIP Call-ID (the two-key model) */
     if (!st->corr[0] || !strcasecmp(st->corr, "auto")) {
@@ -990,6 +1034,7 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
     st->sink.on_audio = es_sink_audio;
     st->sink.on_clear = es_sink_clear;
     st->sink.on_mark  = es_sink_mark;
+    st->sink.on_json  = es_sink_json;
     st->sink.on_dtmf  = es_sink_dtmf;
     st->sink.on_command = es_sink_command;
     st->sink.on_transcript = es_sink_transcript;
@@ -1177,7 +1222,7 @@ static switch_status_t es_set_mask(switch_core_session_t *session, const char *i
 /*
  * Compatibility shim for amigniter/mod_audio_stream's positional syntax:
  *   uuid_audio_stream <uuid> start <wss-url> <mix-type> <rate> [metadata]
- *   uuid_audio_stream <uuid> stop|pause|resume|graceful-shutdown
+ *   uuid_audio_stream <uuid> stop|pause|resume|graceful-shutdown|clear_playback
  *   uuid_audio_stream <uuid> send_text <text>
  * Translated to Earshot's named form (native proto, L16 at the requested rate,
  * which the adapter resamples to the channel rate). `raw` is the untokenized
@@ -1206,8 +1251,18 @@ static switch_status_t es_compat(switch_core_session_t *session, int argc, char 
         nargv[n++] = (char *) "proto=native";
         nargv[n++] = (char *) "codec=l16";
         nargv[n++] = switch_core_session_sprintf(session, "rate=%d", hz);
+        /* everything after <rate> is the metadata JSON (it contains spaces), sent to the
+         * agent as the first text frame; the dialect's events are mirrored for the caller. */
+        {
+            switch_channel_t *channel = switch_core_session_get_channel(session);
+            const char *metadata = es_after_tokens(raw, 5);
+            switch_channel_set_variable(channel, "EARSHOT_COMPAT_MAS", "true");
+            switch_channel_set_variable(channel, "EARSHOT_COMPAT_METADATA", (metadata && *metadata) ? metadata : NULL);
+        }
         return es_start(session, n, nargv, stream);
     }
+    if (!strcasecmp(verb, "clear_playback"))                    /* drop queued agent audio (barge-in) */
+        return es_simple(session, "flush", "", stream);
     if (!strcasecmp(verb, "send_text"))
         return es_send_text_cmd(session, "", es_after_tokens(raw, 2), stream);
     if (!strcasecmp(verb, "graceful-shutdown"))
@@ -1338,6 +1393,9 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_earshot_load)
     switch_event_reserve_subclass(EARSHOT_EVENT_SPEECH_START);
     switch_event_reserve_subclass(EARSHOT_EVENT_SPEECH_STOP);
     switch_event_reserve_subclass(EARSHOT_EVENT_DTMF);
+    switch_event_reserve_subclass(MAS_EVENT_JSON);
+    switch_event_reserve_subclass(MAS_EVENT_DISCONNECT);
+    switch_event_reserve_subclass(MAS_EVENT_ERROR);
     switch_event_reserve_subclass(EARSHOT_EVENT_TRANSCRIPT);
 
     SWITCH_ADD_API(api_interface, "earshot", "Earshot audio-stream control", earshot_api_function, EARSHOT_SYNTAX);
@@ -1413,6 +1471,9 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_earshot_shutdown)
     switch_event_free_subclass(EARSHOT_EVENT_SPEECH_START);
     switch_event_free_subclass(EARSHOT_EVENT_SPEECH_STOP);
     switch_event_free_subclass(EARSHOT_EVENT_DTMF);
+    switch_event_free_subclass(MAS_EVENT_JSON);
+    switch_event_free_subclass(MAS_EVENT_DISCONNECT);
+    switch_event_free_subclass(MAS_EVENT_ERROR);
     switch_event_free_subclass(EARSHOT_EVENT_TRANSCRIPT);
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_earshot shutdown\n");
     return SWITCH_STATUS_SUCCESS;

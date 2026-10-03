@@ -79,6 +79,10 @@ typedef struct {
     /* control channel: agent -> call action, pre-translated to a whitelisted uuid_* API.
      * api==NULL means the action was not recognized. id echoes back in the result. */
     void (*on_command)(void *user, const char *action, const char *api, const char *arg, const char *id);
+    /* mod_audio_stream dialect: a non-audio JSON message from the agent, verbatim
+     * (e.g. {"control":{"command":"pickCall"}}), handed up so the module can surface
+     * it as the mod_audio_stream::json event that existing controllers consume. */
+    void (*on_json)(void *user, const char *text);
     /* STT transcript (assemblyai): recognized text; is_final marks an end-of-turn result. May be NULL. */
     void (*on_transcript)(void *user, const char *text, int is_final);
 } es_proto_sink_t;
