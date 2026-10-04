@@ -42,6 +42,14 @@
 #define ES_PLAY_BUF_MAX (2 * 1024 * 1024)  /* play-buffer cap: must fit a full burst-delivered
                                             * agent response (see es_sink_audio) */
 #define ES_GREETING_MAX_MS 15000           /* welcome-greeting file is loaded up to this length */
+#define ES_MARKS_MAX 64                    /* pending Twilio marks per stream */
+#define ES_PLAY_HANGOVER_US 300000         /* after agent audio, keep the line silent this long before
+                                            * handing FreeSWITCH's own audio back (hides inter-chunk gaps) */
+
+/* Control flags written on one thread (API / ws service) and read on another (media / DTMF).
+ * Plain int access would be a data race in C11 terms; these keep it defined and cheap. */
+#define ES_LOAD(x)     __atomic_load_n(&(x), __ATOMIC_ACQUIRE)
+#define ES_STORE(x, v) __atomic_store_n(&(x), (v), __ATOMIC_RELEASE)
 #define ES_META_MAX 1024                   /* max EARSHOT_META bytes put on the handshake header */
 
 #define EARSHOT_BUG_NAME           "earshot"
@@ -94,7 +102,22 @@ typedef enum {
  * covers ~256 ms at 16 kHz / ~85 ms at 48 kHz — telephony channels are 8/16 kHz. */
 #define ES_FADE_MAX_SAMPLES 4096
 
-typedef struct {
+/* A Twilio mark pinned to its position in the agent's audio: echoed once playback has consumed
+ * every byte queued before it (or at once when a flush discards that audio). */
+typedef struct es_mark {
+    struct es_mark *next;
+    uint64_t        at;        /* play_in when the mark arrived */
+    char            name[];
+} es_mark_t;
+
+/* All streams on one channel, so channel-wide controls (mask) reach every fan-out stream. */
+typedef struct es_chan {
+    switch_mutex_t   *mu;
+    struct es_stream *head;
+} es_chan_t;
+#define EARSHOT_CHAN_KEY "earshot:chan"
+
+typedef struct es_stream {
     switch_core_session_t *session;    /* owning session (WS thread is joined before it is torn down) */
     char             url[1024];
     es_codec_t       codec;
@@ -111,7 +134,8 @@ typedef struct {
     char             cmd_allow[256]; /* commands=<csv>: only these actions allowed */
     char             setvar_allow[256]; /* setvars=<csv>: variable names the setvar action may set */
     switch_bool_t    dtmf_on;       /* capture caller DTMF -> events + agent */
-    switch_bool_t    masking;       /* PCI window: mute caller audio + suppress DTMF to the agent */
+    switch_bool_t    masking;       /* PCI window: mute caller audio + suppress DTMF to the agent (ES_LOAD/STORE) */
+    switch_bool_t    paused;        /* `pause`: caller audio not sent, agent audio held (ES_LOAD/STORE) */
     uint64_t         dtmf_count;    /* caller DTMF digits seen (metric) */
 
     switch_media_bug_t *bug;
@@ -144,7 +168,11 @@ typedef struct {
     switch_buffer_t *play_buf;      /* agent audio (decoded L16) awaiting playback */
     switch_mutex_t  *play_mutex;    /* guards play_buf: es_ws thread writes, media thread reads */
     switch_mutex_t  *cmd_ws_mutex;  /* serializes a command worker's echo (es_ws_send_text) against CLOSE's es_ws_destroy */
-    switch_queue_t  *marks;         /* pending Twilio marks to echo once playback drains */
+    struct es_mark  *marks_head, *marks_tail;  /* pending Twilio marks, guarded by play_mutex */
+    int              marks_n;                  /* pending marks (play_mutex) */
+    uint64_t         play_in, play_out;        /* bytes queued to / consumed from play_buf (play_mutex) */
+    switch_time_t    play_last;                /* last tick that substituted agent audio (ES_LOAD/STORE) */
+    struct es_stream *chan_next;    /* next stream on this channel (es_chan_t list) */
 
     /* welcome greeting: a file preloaded at channel rate, dropped into the playout the moment
      * the ready-gate opens so it leads the agent's first words (see the ready-announce block) */
@@ -223,7 +251,7 @@ static void es_fire_metrics(switch_core_session_t *session, es_stream_t *st)
     switch_event_add_header(event, SWITCH_STACK_BOTTOM, "barges",          "%" SWITCH_UINT64_T_FMT, st->barges);
     switch_event_add_header(event, SWITCH_STACK_BOTTOM, "talking",         "%d", st->talking);
     switch_event_add_header(event, SWITCH_STACK_BOTTOM, "dtmf",            "%" SWITCH_UINT64_T_FMT, st->dtmf_count);
-    switch_event_add_header(event, SWITCH_STACK_BOTTOM, "masking",         "%d", st->masking);
+    switch_event_add_header(event, SWITCH_STACK_BOTTOM, "masking",         "%d", ES_LOAD(st->masking));
     switch_event_add_header(event, SWITCH_STACK_BOTTOM, "play-buffered",  "%u",
                             st->play_buf ? (unsigned) switch_buffer_inuse(st->play_buf) : 0);
     switch_event_add_header(event, SWITCH_STACK_BOTTOM, "ws-connected",   "%d", ws.connected);
@@ -256,15 +284,58 @@ static void es_fade_out(switch_buffer_t *buf, int fade_ms, int rate)
     switch_buffer_write(buf, tmp, n * 2);  /* the caller now hears a fade to silence, not a cut */
 }
 
+/* Discard queued agent audio (play_mutex held), keeping the fade tail if one was written.
+ * The marks pinned to the discarded audio become due at once: Twilio reports cleared marks
+ * too, and an agent waiting on one must not wait forever. */
+static void es_play_discard_locked(es_stream_t *st, int fade)
+{
+    if (fade) es_fade_out(st->play_buf, st->barge_fade_ms, st->chan_rate);
+    else      switch_buffer_zero(st->play_buf);
+    st->play_out = st->play_in - switch_buffer_inuse(st->play_buf);
+    ES_STORE(st->play_last, 0);            /* the caller interrupted: no silence hangover */
+}
+
 /* Interrupt the agent: fade or hard-cut the queued playback per barge_fade_ms. */
 static void es_barge_now(es_stream_t *st)
 {
     if (!st->play_buf) return;
     switch_mutex_lock(st->play_mutex);
-    if (st->barge_fade_ms > 0) es_fade_out(st->play_buf, st->barge_fade_ms, st->chan_rate);
-    else                       switch_buffer_zero(st->play_buf);
+    es_play_discard_locked(st, st->barge_fade_ms > 0);
     switch_mutex_unlock(st->play_mutex);
     st->barges++;
+}
+
+/* Remove a stream from its channel's list (no-op if there is no list or it is not on it). */
+static void es_chan_unlink(switch_channel_t *channel, es_stream_t *st)
+{
+    es_chan_t *ch = (es_chan_t *) switch_channel_get_private(channel, EARSHOT_CHAN_KEY);
+    es_stream_t **pp;
+    if (!ch) return;
+    switch_mutex_lock(ch->mu);
+    for (pp = &ch->head; *pp; pp = &(*pp)->chan_next)
+        if (*pp == st) { *pp = st->chan_next; break; }
+    switch_mutex_unlock(ch->mu);
+}
+
+/* PCI masking is a property of the call, not of one stream: a fan-out transcription or
+ * supervisor stream must go quiet too, or the card number leaks through the side door. */
+static void es_mask_channel(switch_core_session_t *session, switch_bool_t on, const char *who)
+{
+    switch_channel_t *channel = switch_core_session_get_channel(session);
+    es_chan_t *ch = (es_chan_t *) switch_channel_get_private(channel, EARSHOT_CHAN_KEY);
+    int n = 0;
+    if (ch) {
+        es_stream_t *s;
+        switch_mutex_lock(ch->mu);
+        for (s = ch->head; s; s = s->chan_next) { ES_STORE(s->masking, on); n++; }
+        switch_channel_set_variable(channel, "earshot_masking", on ? "true" : "false");   /* under ch->mu: a
+                                                 stream starting now sees either the sweep or the variable */
+        switch_mutex_unlock(ch->mu);
+    } else {
+        switch_channel_set_variable(channel, "earshot_masking", on ? "true" : "false");
+    }
+    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "earshot: masking %s (%s, %d stream%s)\n",
+                      on ? "ON" : "OFF", who, n, n == 1 ? "" : "s");
 }
 
 /* Caller DTMF hook: capture digits -> earshot::dtmf + forward to the agent. During a
@@ -278,15 +349,16 @@ static switch_status_t es_dtmf_hook(switch_core_session_t *session, const switch
     char d[2];
     if (!st || direction != SWITCH_DTMF_RECV) return SWITCH_STATUS_SUCCESS;
     st->dtmf_count++;
-    if (st->masking) {
+    if (ES_LOAD(st->masking)) {
         es_fire_event(session, EARSHOT_EVENT_DTMF, "masked", "true");   /* audit only, digit redacted */
     } else if (st->dtmf_on) {
         d[0] = dtmf->digit; d[1] = 0;
         es_fire_event(session, EARSHOT_EVENT_DTMF, "digit", d);
-        if (st->ws) es_proto_send_dtmf(st->proto_ctx, st->ws, d);
+        if (st->ws && !ES_LOAD(st->paused)) es_proto_send_dtmf(st->proto_ctx, st->ws, d);   /* paused: nothing to the agent */
     }
-    /* barge on caller DTMF (interruptible=dtmf|any), but not during a card-entry masking window */
-    if (!st->masking && (st->barge == ES_BARGE_DTMF || st->barge == ES_BARGE_ANY))
+    /* barge on caller DTMF (interruptible=dtmf|any), but not during a card-entry masking window
+     * and not while paused (the held agent audio must survive the pause) */
+    if (!ES_LOAD(st->masking) && !ES_LOAD(st->paused) && (st->barge == ES_BARGE_DTMF || st->barge == ES_BARGE_ANY))
         es_barge_now(st);
     return SWITCH_STATUS_SUCCESS;
 }
@@ -418,7 +490,10 @@ static void es_greeting_emit(es_stream_t *st)
     if (!st->greeting_pcm || !st->play_buf) return;
     switch_mutex_lock(st->play_mutex);
     if (!st->greeting_done) {
-        switch_buffer_write(st->play_buf, st->greeting_pcm, st->greeting_samples * 2);
+        /* counted in play_in like agent audio, so marks and discards stay in step
+         * (switch_buffer_write returns the bytes IN USE, not the bytes written) */
+        if (switch_buffer_write(st->play_buf, st->greeting_pcm, st->greeting_samples * 2))
+            st->play_in += st->greeting_samples * 2;
         st->greeting_done = SWITCH_TRUE;
     }
     switch_mutex_unlock(st->play_mutex);
@@ -442,9 +517,9 @@ static void es_sink_audio(void *user, const int16_t *pcm, size_t nsamples)
         if (r > st->resp_ms_max) st->resp_ms_max = r;
         st->turns++;
     }
-    if (!st->ready) {
+    if (!ES_LOAD(st->ready)) {
         /* first-frame gate opens here; connect/manual gates are opened elsewhere */
-        if (st->ready_mode == ES_READY_FIRSTFRAME) st->ready = SWITCH_TRUE;
+        if (st->ready_mode == ES_READY_FIRSTFRAME) ES_STORE(st->ready, SWITCH_TRUE);
         else return;                       /* manual/connect not yet ready -> drop */
     }
     if (!st->play_buf) return;
@@ -456,8 +531,9 @@ static void es_sink_audio(void *user, const int16_t *pcm, size_t nsamples)
      * overlapped fragments (drops counted, audibly confirmed on a live phone test).
      * 2MB = ~130s @8k L16 / ~65s @16k. Barge-in flush still empties it instantly,
      * and the cap still bounds a stuck playback. */
-    if (switch_buffer_inuse(st->play_buf) < ES_PLAY_BUF_MAX)
-        switch_buffer_write(st->play_buf, pcm, nsamples * 2);
+    if (switch_buffer_inuse(st->play_buf) < ES_PLAY_BUF_MAX) {
+        if (switch_buffer_write(st->play_buf, pcm, nsamples * 2)) st->play_in += nsamples * 2;  /* returns bytes in use */
+    }
     else
         st->play_drops++;                  /* playback isn't draining: drop new agent audio */
     switch_mutex_unlock(st->play_mutex);
@@ -484,7 +560,7 @@ static void es_sink_clear(void *user)
     es_stream_t *st = (es_stream_t *) user;
     if (st->play_buf) {
         switch_mutex_lock(st->play_mutex);
-        switch_buffer_zero(st->play_buf);
+        es_play_discard_locked(st, 0);
         switch_mutex_unlock(st->play_mutex);
     }
 }
@@ -493,11 +569,47 @@ static void es_sink_clear(void *user)
 static void es_sink_mark(void *user, const char *name)
 {
     es_stream_t *st = (es_stream_t *) user;
-    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "earshot: queued mark '%s'\n", name ? name : "");
-    if (st->marks && name) {
-        char *m = strdup(name);   /* consumer (WRITE_REPLACE / CLOSE) frees it; free here if the 64-deep queue is full */
-        if (m && switch_queue_trypush(st->marks, m) != SWITCH_STATUS_SUCCESS) free(m);
+    es_mark_t *m;
+    size_t n;
+    uint64_t at;
+    if (!name || !st->play_mutex || !st->play_buf) return;   /* a read-only fork plays nothing: no marks */
+    n = strlen(name);
+    m = malloc(sizeof(*m) + n + 1);        /* freed when echoed (WRITE_REPLACE) or at CLOSE */
+    if (!m) return;
+    memcpy(m->name, name, n + 1);
+    m->next = NULL;
+    switch_mutex_lock(st->play_mutex);
+    if (st->marks_n >= ES_MARKS_MAX) {     /* agent is flooding marks: keep the list bounded */
+        switch_mutex_unlock(st->play_mutex);
+        free(m);
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "earshot: mark '%s' dropped (%d pending)\n", name, ES_MARKS_MAX);
+        return;
     }
+    at = m->at = st->play_in;              /* due once everything queued so far has played */
+    if (st->marks_tail) st->marks_tail->next = m; else st->marks_head = m;
+    st->marks_tail = m;
+    st->marks_n++;
+    switch_mutex_unlock(st->play_mutex);   /* m may be echoed and freed from here on: use the copy */
+    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "earshot: queued mark '%s' at byte %" SWITCH_UINT64_T_FMT "\n", name, at);
+}
+
+/* Detach the marks whose audio has played or was discarded. play_mutex held. A remnant
+ * smaller than one frame never plays on its own (WRITE_REPLACE only pulls whole frames),
+ * so for marks it counts as drained, as 0.4.0 did; otherwise a mark after an utterance
+ * that is not a multiple of the frame size would wait for the next utterance. */
+static es_mark_t *es_marks_due_locked(es_stream_t *st, switch_size_t frame_bytes)
+{
+    es_mark_t *due = NULL, **tail = &due;
+    switch_size_t left = switch_buffer_inuse(st->play_buf);
+    uint64_t drained = st->play_out + (left < frame_bytes ? left : 0);
+    while (st->marks_head && st->marks_head->at <= drained) {
+        es_mark_t *m = st->marks_head;
+        st->marks_head = m->next;
+        if (!st->marks_head) st->marks_tail = NULL;
+        st->marks_n--;
+        m->next = NULL; *tail = m; tail = &m->next;
+    }
+    return due;
 }
 
 /* agent-signalled DTMF (e.g. Deepgram): the caller's own DTMF is audited via earshot::dtmf on
@@ -701,9 +813,8 @@ static void es_sink_command(void *user, const char *action, const char *api, con
         return;
     }
     if (!strcasecmp(api, "__mask__")) {   /* earshot-internal, non-blocking: handle inline */
-        st->masking = (switch_bool_t) switch_true(arg);
         st->commands++;
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "earshot: masking %s (agent)\n", st->masking ? "ON" : "OFF");
+        es_mask_channel(st->session, (switch_bool_t) switch_true(arg), "agent");
         es_cmd_audit(st->uuid, st->corr, action, "__mask__", NULL, SWITCH_STATUS_SUCCESS, NULL);
         es_cmd_echo(st->ws, id, action, NULL, SWITCH_STATUS_SUCCESS);
         return;
@@ -746,7 +857,7 @@ static void es_on_ws_event(void *user, int connected, int code, const char *reas
          * written for it (and their call records) expect call_id / caller / callee there. */
         if (st->compat_mas && st->compat_metadata[0])
             es_ws_send_text(st->ws, st->compat_metadata, strlen(st->compat_metadata));
-        if (st->ready_mode == ES_READY_CONNECT) st->ready = SWITCH_TRUE;
+        if (st->ready_mode == ES_READY_CONNECT) ES_STORE(st->ready, SWITCH_TRUE);
     } else if (st->session) {
         /* code < 0 = connect/handshake failure, otherwise a normal close (incl. reconnect churn).
          * Safe to fire from the ws service thread: es_ws_stop mutes further callbacks and
@@ -785,8 +896,9 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
         frame.data = rbuf;
         frame.buflen = sizeof(rbuf);
         if (switch_core_media_bug_read(bug, &frame, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS && frame.datalen) {
-            /* masking window (PCI): don't leak caller audio to the agent */
-            if (st->ws && es_ws_connected(st->ws) && !st->masking) {
+            /* masking window (PCI): don't leak caller audio to the agent; `pause`: nothing
+             * leaves the box until `resume` (mod_audio_stream semantics) */
+            if (st->ws && es_ws_connected(st->ws) && !ES_LOAD(st->masking) && !ES_LOAD(st->paused)) {
                 /* the proto adapter frames it (native binary / twilio media JSON) */
                 es_proto_send_audio(st->proto_ctx, st->ws, (const int16_t *) frame.data, frame.datalen / 2);
                 st->tx_frames++;
@@ -802,7 +914,7 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
                         switch_channel_set_variable(switch_core_session_get_channel(s), "earshot_talking", "true");
                         es_fire_event(s, EARSHOT_EVENT_SPEECH_START, "corr", st->corr);
                     }
-                    if (st->barge == ES_BARGE_SPEECH || st->barge == ES_BARGE_ANY) {
+                    if ((st->barge == ES_BARGE_SPEECH || st->barge == ES_BARGE_ANY) && !ES_LOAD(st->paused)) {
                         if (st->barge_min_ms <= 0) {
                             es_barge_now(st);                    /* interrupt immediately */
                         } else {                                 /* defer: needs sustained speech (backchannel filter) */
@@ -837,7 +949,7 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
             }
         }
         /* announce the ready-gate exactly once, here on the media thread (valid session) */
-        if (st->ready && !st->ready_announced) {
+        if (ES_LOAD(st->ready) && !st->ready_announced) {
             switch_core_session_t *s = switch_core_media_bug_get_session(bug);
             st->ready_announced = SWITCH_TRUE;
             es_greeting_emit(st);   /* covers the agent-still-silent case; no-op if already emitted */
@@ -860,28 +972,40 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
 
     case SWITCH_ABC_TYPE_WRITE_REPLACE: {   /* agent audio -> caller */
         /* MUST set a replace frame every time this fires (else FS derefs an unset
-         * frame -> crash). Replace outbound audio with buffered agent audio; pad
-         * silence when the agent hasn't sent enough yet. */
+         * frame -> crash). Replace outbound audio with buffered agent audio when a
+         * full frame is queued; otherwise hand FreeSWITCH's own frame back untouched. */
         switch_frame_t *frame = switch_core_media_bug_get_write_replace_frame(bug);
         if (frame && frame->data && frame->datalen && st->play_buf) {
-            switch_size_t need = frame->datalen, got = 0, left;
+            switch_size_t need = frame->datalen, got = 0;
+            es_mark_t *due = NULL;
+            switch_time_t now = switch_micro_time_now();
             switch_mutex_lock(st->play_mutex);
-            if (switch_buffer_inuse(st->play_buf) >= need)
+            if (!ES_LOAD(st->paused) && switch_buffer_inuse(st->play_buf) >= need) {
                 got = switch_buffer_read(st->play_buf, frame->data, need);
-            left = switch_buffer_inuse(st->play_buf);
+                st->play_out += got;
+            }
+            due = es_marks_due_locked(st, need);
             switch_mutex_unlock(st->play_mutex);
-            if (got < need) memset((uint8_t *) frame->data + got, 0, need - got);
+            if (got == need) {
+                ES_STORE(st->play_last, now);              /* agent audio replaces the frame */
+            } else if (got) {                              /* cannot happen for a dynamic buffer; be safe */
+                memset((uint8_t *) frame->data + got, 0, need - got);
+                ES_STORE(st->play_last, now);
+            } else if (ES_LOAD(st->play_last) && now - ES_LOAD(st->play_last) < ES_PLAY_HANGOVER_US) {
+                /* between two chunks of one utterance: silence, not a blip of what is underneath */
+                memset(frame->data, 0, need);
+            }
+            /* else: agent silent (or paused): leave the frame as FreeSWITCH built it, so ringback,
+             * hold music or the far party keep flowing. Replacing it with zeros here muted the
+             * controller's ringback until the agent's first word. */
             switch_core_media_bug_set_write_replace_frame(bug, frame);
-            /* Twilio mark: echo pending marks once the agent's audio has drained
-             * (less than a full frame remaining = the utterance has played out). */
-            if (left < need && st->marks) {
-                void *m;
-                while (switch_queue_trypop(st->marks, &m) == SWITCH_STATUS_SUCCESS) {
-                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-                                      "earshot: echoing mark '%s' (playback drained)\n", (const char *) m);
-                    es_proto_send_mark(st->proto_ctx, st->ws, (const char *) m);
-                    free(m);
-                }
+            /* Twilio marks: echo each one once the audio queued before it has played (or was
+             * discarded by a flush), in order. */
+            while (due) {
+                es_mark_t *m = due; due = m->next;
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "earshot: echoing mark '%s'\n", m->name);
+                if (st->ws) es_proto_send_mark(st->proto_ctx, st->ws, m->name);
+                free(m);
             }
         }
         break;
@@ -892,6 +1016,7 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
         if (s) {
             if (st->owns_dtmf_hook) switch_core_event_hook_remove_recv_dtmf(s, es_dtmf_hook);
             switch_channel_set_private(switch_core_session_get_channel(s), es_privkey(s, st->id), NULL);
+            es_chan_unlink(switch_core_session_get_channel(s), st);
             es_fire_metrics(s, st);      /* final snapshot while ws stats are still available */
         }
         if (st->ws) {
@@ -902,10 +1027,12 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
         }
         if (st->proto_ctx) { es_proto_destroy(st->proto_ctx); st->proto_ctx = NULL; }
         if (st->vad) switch_vad_destroy(&st->vad);
-        if (st->marks) { void *m; while (switch_queue_trypop(st->marks, &m) == SWITCH_STATUS_SUCCESS) free(m); }
-        if (st->play_buf) {
+        if (st->play_mutex) {
+            es_mark_t *m;
             switch_mutex_lock(st->play_mutex);
-            switch_buffer_destroy(&st->play_buf);
+            while ((m = st->marks_head)) { st->marks_head = m->next; free(m); }
+            st->marks_tail = NULL; st->marks_n = 0;
+            if (st->play_buf) switch_buffer_destroy(&st->play_buf);
             switch_mutex_unlock(st->play_mutex);
         }
         break;
@@ -1039,7 +1166,6 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
     st->sink.on_command = es_sink_command;
     st->sink.on_transcript = es_sink_transcript;
     switch_copy_string(st->uuid, switch_core_session_get_uuid(session), sizeof st->uuid);
-    switch_queue_create(&st->marks, 64, pool);
 
     /* playback buffer for agent audio (byte-granular so WRITE_REPLACE pulls exact frames);
      * read-only forks (dir=in) never play back, so they don't allocate one */
@@ -1092,8 +1218,22 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
         }
     }
 
+    {   /* join the channel-wide stream list BEFORE the bug goes live, inheriting an open masking
+         * window, so not one caller frame of a card number reaches a stream started mid-window */
+        es_chan_t *ch = (es_chan_t *) switch_channel_get_private(channel, EARSHOT_CHAN_KEY);
+        if (!ch) {
+            ch = switch_core_session_alloc(session, sizeof(*ch));
+            switch_mutex_init(&ch->mu, SWITCH_MUTEX_NESTED, pool);
+            switch_channel_set_private(channel, EARSHOT_CHAN_KEY, ch);
+        }
+        switch_mutex_lock(ch->mu);
+        if (switch_true(switch_channel_get_variable(channel, "earshot_masking"))) ES_STORE(st->masking, SWITCH_TRUE);
+        st->chan_next = ch->head; ch->head = st;
+        switch_mutex_unlock(ch->mu);
+    }
     if (switch_core_media_bug_add(session, es_privkey(session, st->id), NULL, es_media_bug_cb, st, 0,
                                   st->bug_flags, &st->bug) != SWITCH_STATUS_SUCCESS) {
+        es_chan_unlink(channel, st);
         stream->write_function(stream, "-ERR could not attach media bug\n");
         es_ws_destroy(st->ws); st->ws = NULL;
         es_proto_destroy(st->proto_ctx); st->proto_ctx = NULL;
@@ -1117,17 +1257,24 @@ static switch_status_t es_simple(switch_core_session_t *session, const char *ver
 
     if (!strcasecmp(verb, "stop")) {
         switch_core_media_bug_remove(session, &st->bug);   /* triggers CLOSE -> teardown (clears private) */
-    } else if (!strcasecmp(verb, "pause"))  { st->ready = SWITCH_FALSE; /* hold playback via the ready-gate */ }
-    else if (!strcasecmp(verb, "resume")) { st->ready = SWITCH_TRUE; /* open ready-gate */ }
-    else if (!strcasecmp(verb, "flush"))  {   /* barge-in: drop any queued agent audio now */
-        if (st->play_buf) { switch_mutex_lock(st->play_mutex); switch_buffer_zero(st->play_buf); switch_mutex_unlock(st->play_mutex); }
+    } else if (!strcasecmp(verb, "pause")) {
+        /* freeze both directions: caller audio stops going to the agent and queued agent audio is
+         * held (not dropped). This is what mod_audio_stream's `pause` means and what controllers
+         * rely on ("pause until pickCall"); earlier versions only closed the ready-gate, so the
+         * agent kept hearing the caller while "paused". */
+        ES_STORE(st->paused, SWITCH_TRUE);
+    } else if (!strcasecmp(verb, "resume")) {
+        ES_STORE(st->paused, SWITCH_FALSE);
+        ES_STORE(st->ready, SWITCH_TRUE);   /* also opens a ready=manual gate */
+    } else if (!strcasecmp(verb, "flush"))  {   /* barge-in: drop any queued agent audio now */
+        if (st->play_buf) { switch_mutex_lock(st->play_mutex); es_play_discard_locked(st, 0); switch_mutex_unlock(st->play_mutex); }
     }
     else if (!strcasecmp(verb, "status")) {
         stream->write_function(stream,
-            "{\"id\":\"%s\",\"proto\":\"%s\",\"corr\":\"%s\",\"ws_connected\":%d,\"ready\":%d,"
+            "{\"id\":\"%s\",\"proto\":\"%s\",\"corr\":\"%s\",\"ws_connected\":%d,\"ready\":%d,\"paused\":%d,"
             "\"rx_frames\":%llu,\"play_buffered\":%u}\n",
             st->id[0] ? st->id : "default", es_proto_name(st->proto), st->corr,
-            st->ws ? es_ws_connected(st->ws) : 0, st->ready,
+            st->ws ? es_ws_connected(st->ws) : 0, ES_LOAD(st->ready), ES_LOAD(st->paused),
             (unsigned long long) st->rx_frames,
             st->play_buf ? (unsigned) switch_buffer_inuse(st->play_buf) : 0);
         return SWITCH_STATUS_SUCCESS;
@@ -1147,7 +1294,7 @@ static switch_status_t es_simple(switch_core_session_t *session, const char *ver
             (unsigned long long) st->rx_frames, (unsigned long long) st->rx_bytes,
             (unsigned long long) st->play_drops, (unsigned long long) st->commands,
             (unsigned long long) st->speech_starts, (unsigned long long) st->barges, st->talking,
-            (unsigned long long) st->dtmf_count, st->masking,
+            (unsigned long long) st->dtmf_count, ES_LOAD(st->masking),
             st->play_buf ? (unsigned) switch_buffer_inuse(st->play_buf) : 0,
             (unsigned long long) st->first_audio_ms, (unsigned long long) st->resp_ms_last,
             (unsigned long long) st->resp_ms_max, (unsigned long long) st->turns,
@@ -1212,9 +1359,7 @@ static switch_status_t es_set_mask(switch_core_session_t *session, const char *i
     switch_channel_t *channel = switch_core_session_get_channel(session);
     es_stream_t *st = (es_stream_t *) switch_channel_get_private(channel, es_privkey(session, id));
     if (!st) { stream->write_function(stream, "-ERR no active earshot stream\n"); return SWITCH_STATUS_FALSE; }
-    st->masking = on;
-    switch_channel_set_variable(channel, "earshot_masking", on ? "true" : "false");
-    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "earshot: masking %s\n", on ? "ON" : "OFF");
+    es_mask_channel(session, on, "operator");
     stream->write_function(stream, "+OK mask %s\n", on ? "on" : "off");
     return SWITCH_STATUS_SUCCESS;
 }

@@ -19,7 +19,40 @@ void switch_resample_destroy(switch_audio_resampler_t **r) { if (r) *r = 0; }
 int switch_resample_process(switch_audio_resampler_t *r, int16_t *x, int n) { (void) r;(void) x;(void) n; return 0; }
 switch_size_t switch_b64_encode(unsigned char *s, switch_size_t sl, unsigned char *d, switch_size_t dl)
 { (void) s;(void) sl;(void) dl; if (d) d[0] = 0; return 0; }
-switch_size_t switch_b64_decode(char *s, char *d, switch_size_t dl) { (void) s;(void) dl; if (d) d[0] = 0; return 0; }
+/* real base64 decode (RFC 4648, '=' padding, no line breaks), FreeSWITCH-style: returns bytes
+ * written and NUL-terminates when room allows; stops at the output capacity */
+switch_size_t switch_b64_decode(char *s, char *d, switch_size_t dl)
+{
+    static const char *tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    unsigned v = 0; int bits = 0; switch_size_t n = 0;
+    if (!s || !d || !dl) return 0;
+    for (; *s && *s != '='; s++) {
+        const char *q = strchr(tbl, *s);
+        if (!q) continue;
+        v = (v << 6) | (unsigned) (q - tbl); bits += 6;
+        if (bits >= 8) { bits -= 8; if (n + 1 >= dl) break; d[n++] = (char) ((v >> bits) & 0xFF); }
+    }
+    if (n < dl) d[n] = 0;
+    return n;
+}
+switch_size_t switch_b64_encode_real(const unsigned char *in, switch_size_t il, char *out, switch_size_t ol)
+{
+    static const char *tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    switch_size_t i, o = 0;
+    for (i = 0; i + 2 < il; i += 3) {
+        if (o + 4 >= ol) return 0;
+        out[o++] = tbl[in[i] >> 2]; out[o++] = tbl[((in[i] & 3) << 4) | (in[i + 1] >> 4)];
+        out[o++] = tbl[((in[i + 1] & 15) << 2) | (in[i + 2] >> 6)]; out[o++] = tbl[in[i + 2] & 63];
+    }
+    if (i < il) {
+        if (o + 4 >= ol) return 0;
+        out[o++] = tbl[in[i] >> 2];
+        if (i + 1 < il) { out[o++] = tbl[((in[i] & 3) << 4) | (in[i + 1] >> 4)]; out[o++] = tbl[(in[i + 1] & 15) << 2]; }
+        else            { out[o++] = tbl[(in[i] & 3) << 4]; out[o++] = '='; }
+        out[o++] = '=';
+    }
+    out[o] = 0; return o;
+}
 
 int es_ws_send_text(es_ws_t *w, const char *d, size_t l) { (void) w;(void) d;(void) l; return 0; }
 int es_ws_send_binary(es_ws_t *w, const void *d, size_t l) { (void) w;(void) d;(void) l; return 0; }

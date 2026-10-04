@@ -66,7 +66,8 @@ base64, and the session handshake.
 | `gemini` | Gemini Live (`setup`, `realtimeInput.audio` 16k out / `serverContent` 24k PCM in; **JSON over binary frames**) | `serverContent.interrupted` |
 | `pipecat` | Pipecat protobuf `Frame{ audio: AudioRawFrame }` (binary, L16) | `InterruptionFrame` |
 
-- Twilio **mark echo-on-drain** round-trips (agents that wait on marks work).
+- Twilio **marks echo at their position** in the audio, in order (agents that wait on marks work; marks
+  on audio discarded by a clear are echoed at once, as Twilio does).
 - OpenAI negotiates the `realtime` WebSocket subprotocol automatically (auth via `EARSHOT_AUTH`).
 - ElevenLabs' `ping` keepalive is answered with `pong` automatically (no dropped sessions).
 - Gemini's asymmetric rates (16 kHz in / 24 kHz out) are resampled transparently to the channel.
@@ -182,7 +183,8 @@ for card entry — a self-hosted capability a managed SaaS makes you pay dearly 
 - **Capture** (`dtmf=on`): a session `recv_dtmf` hook turns caller digits into `earshot::dtmf` events
   and forwards them to the agent (native `{"type":"dtmf","digit":"5"}` / Twilio `dtmf` event).
 - **Masking window** — `earshot <uuid> mask on|off` (operator) or `{"action":"mask","state":"on"}`
-  (agent, via the control channel). While masked:
+  (agent, via the control channel). The window applies to **every stream on the channel**, so a
+  fan-out transcription or supervisor stream goes quiet too. While masked:
   - caller → agent **audio is muted** (spoken card numbers + in-band DTMF never reach the agent),
   - DTMF is **suppressed** from the agent; an `earshot::dtmf` audit event fires with the **digit redacted**,
   - digits still flow to FreeSWITCH, so a secure collector (`play_and_get_digits`) captures the payment.

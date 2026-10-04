@@ -47,5 +47,6 @@ void   switch_resample_destroy(switch_audio_resampler_t **r);
 int    switch_resample_process(switch_audio_resampler_t *r, int16_t *x, int n);
 switch_size_t switch_b64_encode(unsigned char *in, switch_size_t ilen, unsigned char *out, switch_size_t olen);
 switch_size_t switch_b64_decode(char *in, char *out, switch_size_t olen);
+switch_size_t switch_b64_encode_real(const unsigned char *in, switch_size_t ilen, char *out, switch_size_t olen);
 
 #endif /* EARSHOT_TEST_SWITCH_STUB_H */
