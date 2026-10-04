@@ -30,7 +30,7 @@ drop-in **`mod_audio_stream` alternative** whose `WRITE_REPLACE` path is validat
 duplex, on one leg. That's the wedge — everything else builds on it. The full pitch is in
 **[WHY.md](WHY.md)**; the complete capability list is in **[FEATURES.md](FEATURES.md)**.
 
-- **7 wire protocols, agent unmodified** — `native`, `twilio`, `openai` (Realtime),
+- **10 wire protocols, agent unmodified** — `native`, `twilio`, `openai` (Realtime),
   `deepgram` (Voice Agent), `vapi`, `elevenlabs`, `gemini` (Live), `pipecat`, `assemblyai` + `cartesia`
   (streaming STT). Swap vendors with one word.
 - **Turn-taking for any agent** — module-side VAD endpointing → `speech_started`/`speech_stopped`, a
