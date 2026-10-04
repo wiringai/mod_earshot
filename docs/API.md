@@ -41,7 +41,11 @@ Begin streaming the channel's audio to `url` (`ws://` or `wss://`).
 Caller context (customer id, tier, call reason, …) is passed to the agent at connect via the **`EARSHOT_META`** channel variable — see [Caller context](#caller-context).
 
 ### `stop` · `pause` · `resume`
-Tear down / suspend / resume the stream. Channel hangup also tears down cleanly.
+Tear down / suspend / resume the stream. `pause` freezes both directions: caller audio and DTMF
+stop going to the agent, queued agent audio is held (not dropped) and barge-in is suspended until
+`resume`, which also opens a `ready=manual` gate. FreeSWITCH's own audio (ringback, hold music)
+keeps flowing while paused.
+Channel hangup also tears down cleanly.
 
 ### `flush` — barge-in
 Immediately drop queued agent audio (also driven by protocol clear signals and `vad_barge`).
@@ -50,7 +54,8 @@ Immediately drop queued agent audio (also driven by protocol clear signals and `
 Write a raw message to the agent socket.
 
 ### `mask on|off`
-Toggle the PCI masking window (operator control; the agent can also toggle it via the control channel).
+Toggle the PCI masking window on **every stream of the channel** (fan-out streams included);
+operator control, and the agent can also toggle it via the control channel.
 
 ### `status` · `metrics`
 Return per-stream JSON. `metrics` also fires an `earshot::metrics` event. Fields include

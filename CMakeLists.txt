@@ -46,6 +46,17 @@ if(EARSHOT_TESTS)
     ${CMAKE_CURRENT_SOURCE_DIR}/test/support
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   add_test(NAME command_dispatch COMMAND test_command_dispatch)
+
+  # Inbound agent audio of any frame size reaches the sink whole (native/deepgram binary,
+  # pipecat protobuf); same stub harness.
+  add_executable(test_proto_audio
+    test/test_proto_audio.c
+    test/support/command_dispatch_stubs.c
+    src/es_proto.c src/es_cmdguard.c src/es_codec.c src/es_pb.c)
+  target_include_directories(test_proto_audio PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/support
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  add_test(NAME proto_audio COMMAND test_proto_audio)
 endif()
 
 # --- the FreeSWITCH module (skipped gracefully if FS headers are absent) ----
@@ -81,7 +92,7 @@ if(FS_FOUND)
 
   # --- .deb packaging (cpack --config build/CPackConfig.cmake -G DEB) ---------
   set(CPACK_PACKAGE_NAME "mod-earshot")
-  set(CPACK_PACKAGE_VERSION "0.4.0")
+  set(CPACK_PACKAGE_VERSION "0.4.1")
   set(CPACK_PACKAGE_CONTACT "Varun Pratap Singh")
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Earshot — FreeSWITCH <-> AI-agent audio bridge (mod_earshot)")
   set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/wiringai/mod_earshot")

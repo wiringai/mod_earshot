@@ -1,12 +1,10 @@
 /*
  * es_ws — a small WebSocket client for Earshot, over libwebsockets.
  *
- * Owns one connection on its own service thread: all socket I/O happens there,
- * never on the FreeSWITCH media thread. Outbound frames are queued and flushed
- * on WRITEABLE; inbound frames + lifecycle are delivered via callbacks.
- *
- * STATUS: reviewed draft — compiles/validates on a FreeSWITCH+libwebsockets dev
- * box, not on the authoring machine. See ../docs/ARCHITECTURE.md.
+ * Connections share a small pool of libwebsockets service threads (sized to
+ * CPU cores): all socket I/O happens there, never on the FreeSWITCH media
+ * thread. Outbound frames are queued and flushed on WRITEABLE; inbound frames
+ * and lifecycle are delivered via callbacks. See ../docs/ARCHITECTURE.md.
  *
  * Copyright (c) 2026 Varun Pratap Singh. MIT License.
  */

@@ -5,7 +5,39 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-10-04
+
+### Fixed
+- **`pause` now pauses.** It stops caller audio and DTMF going to the agent, holds queued
+  agent audio and suspends barge-in until `resume` (mod_audio_stream semantics, which
+  controllers rely on for "pause until pickCall"). Before, it only closed the ready-gate: the
+  agent kept hearing the caller while "paused", and in the default `ready=firstframe` mode the
+  next agent frame reopened the gate. `status` reports `paused`.
+- **Agent audio frames of any size are played whole.** The native/Deepgram/Vapi binary path
+  (clamped at 8 KB: 256 ms of L16 at 16 kHz), the pipecat protobuf path and the base64 JSON
+  paths (16 KB) decoded into one fixed buffer and silently dropped the rest of a larger frame.
+  Large frames are now decoded in pieces. Regression test: `test/test_proto_audio.c`
+  (native L16/PCMU, pipecat protobuf, OpenAI base64 delta).
+- **`mask on|off` covers every stream on the channel**, including fan-out transcription or
+  supervisor streams, from the operator API and from the agent's `mask` command, and a stream
+  started inside an open window starts masked before its media bug goes live. Before, it
+  masked only the stream it was addressed to, so a side stream kept receiving the card number.
+- **Twilio marks are echoed at their position in the audio**, after the audio queued before
+  each mark has played, in order. Before, every pending mark was echoed only once the whole
+  play buffer drained. Marks pinned to audio discarded by a flush/clear are still echoed at
+  once (Twilio reports cleared marks too).
+- **The caller hears FreeSWITCH's own audio while the agent is silent.** WRITE_REPLACE used to
+  replace every outbound frame with silence when no agent audio was queued, which muted the
+  controller's ringback (`uuid_broadcast`) and hold music until the agent's first word. The
+  frame is now left untouched unless agent audio is being played; for 300 ms after the last
+  agent frame the line stays silent, so gaps between chunks of one utterance do not let the
+  underlying audio blip through. A barge-in hands the line back at once.
+- Cross-thread control flags (`ready`, `paused`, `masking`) are read and written with
+  atomics instead of plain loads and stores.
+
 ### Changed
+- `es_ws.h` no longer calls itself a reviewed draft; the header describes the shared
+  service-thread pool that has been in place since 0.1.0.
 - Docs: new `docs/MODULE-VS-AGENT.md` explaining what module-side VAD is (energy endpointing, not a
   turn model), when to leave it off (agents with their own VAD), and why edge latency metrics differ
   from agent-side metrics; README/FEATURES/WHY say "VAD endpointing" instead of "turn detection".

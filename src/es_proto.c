@@ -382,30 +382,51 @@ static void es_emit_audio(es_proto_ctx_t *p, int16_t *pcm, size_t ns, const es_p
     }
 }
 
+/* Decode coded audio of any length and hand it to the sink in pieces that fit the
+ * fixed decode buffer. Earlier versions clamped the input to one buffer (8 KB of
+ * L16 = 256 ms at 16 kHz) and silently dropped the rest, which chopped any agent
+ * that sends a whole utterance in one frame. */
+static void es_decode_chunked(es_proto_ctx_t *p, es_codec_t codec, const uint8_t *in, size_t nbytes,
+                              const es_proto_sink_t *sink)
+{
+    int16_t pcm[SWITCH_RECOMMENDED_BUFFER_SIZE];
+    size_t step = es_encoded_size(codec, sizeof(pcm) / sizeof(pcm[0]));   /* bytes that fill pcm[] */
+    if (!step || step == (size_t) -1) return;
+    while (nbytes) {
+        size_t take = nbytes < step ? nbytes : step, ns;
+        if (codec == ES_CODEC_L16) take &= ~(size_t) 1;        /* whole samples only */
+        if (!take) break;                                      /* a dangling odd byte */
+        ns = es_decode(codec, in, take, pcm);
+        if (ns == (size_t) -1 || !ns) break;
+        es_emit_audio(p, pcm, ns, sink);
+        in += take; nbytes -= take;
+    }
+}
+
 static void es_deliver_ulaw_b64(es_proto_ctx_t *p, const char *b64, es_codec_t codec,
                                 const es_proto_sink_t *sink)
 {
-    char    raw[2 * SWITCH_RECOMMENDED_BUFFER_SIZE];
-    int16_t pcm[SWITCH_RECOMMENDED_BUFFER_SIZE];
-    switch_size_t nb, blen, pad = 0, expected;
-    size_t ns;
+    char    stack_raw[2 * SWITCH_RECOMMENDED_BUFFER_SIZE];
+    char   *raw = stack_raw;
+    switch_size_t rawsz = sizeof stack_raw, nb, blen, pad = 0, expected;
     if (!b64 || !sink || !sink->on_audio) return;
-    nb = switch_b64_decode(b64, raw, sizeof raw);
-    if (!nb) return;
+    blen = strlen(b64);
+    if (blen / 4 * 3 + 4 > rawsz) {                /* a long utterance in one message: heap it */
+        rawsz = blen / 4 * 3 + 4;
+        raw = malloc(rawsz);
+        if (!raw) return;
+    }
+    nb = switch_b64_decode((char *) b64, raw, rawsz);
+    if (!nb) { if (raw != stack_raw) free(raw); return; }
     /* switch_b64_decode's length convention varies by version; derive the exact
      * decoded size from the base64 string so we never keep a spurious trailing
      * byte (which would grow the buffer over a long call and click as loud mu-law). */
-    blen = strlen(b64);
     if (blen >= 1 && b64[blen - 1] == '=') pad++;
     if (blen >= 2 && b64[blen - 2] == '=') pad++;
     expected = blen / 4 * 3 - pad;
     if (nb > expected) nb = expected;
-    {   /* clamp to the byte count that fills pcm[] for THIS codec (L16=2B/sample, g711=1B) */
-        size_t cap = es_encoded_size(codec, sizeof(pcm) / sizeof(pcm[0]));
-        if (cap != (size_t) -1 && nb > cap) nb = cap;
-    }
-    ns = es_decode(codec, (const uint8_t *) raw, nb, pcm);
-    if (ns != (size_t) -1 && ns) es_emit_audio(p, pcm, ns, sink);
+    es_decode_chunked(p, codec, (const uint8_t *) raw, nb, sink);
+    if (raw != stack_raw) free(raw);
 }
 
 static es_codec_t es_codec_from_wire(const char *name, es_codec_t deflt)
@@ -741,8 +762,6 @@ static void es_pipecat_on_binary(es_proto_ctx_t *p, const uint8_t *data, size_t 
     if (es_pb_decode_frame(data, len, &f) != 0) return;        /* malformed -> drop safely */
     if (f.interrupted && sink->on_clear) sink->on_clear(sink->user);
     if (f.has_audio && f.audio_len) {
-        int16_t pcm[SWITCH_RECOMMENDED_BUFFER_SIZE];
-        size_t alen = f.audio_len, ns;
         /* Honor the frame's declared rate: if the agent streams at a rate other than the
          * one we assumed, rebuild the inbound resampler for it (only on change; rs_in is
          * touched solely on this receive thread, so this is safe). */
@@ -752,16 +771,12 @@ static void es_pipecat_on_binary(es_proto_ctx_t *p, const uint8_t *data, size_t 
             if (p->rate_out != p->chan_rate)
                 switch_resample_create(&p->rs_in, p->rate_out, p->chan_rate, 8192, SWITCH_RESAMPLE_QUALITY, 1);
         }
-        if (alen > sizeof(pcm)) alen = sizeof(pcm);           /* L16: bytes -> alen/2 samples <= buf */
-        ns = es_decode(ES_CODEC_L16, f.audio, alen, pcm);
-        if (ns != (size_t) -1 && ns) es_emit_audio(p, pcm, ns, sink);
+        es_decode_chunked(p, ES_CODEC_L16, f.audio, f.audio_len, sink);
     }
 }
 
 void es_proto_on_binary(es_proto_ctx_t *p, const void *data, size_t len, const es_proto_sink_t *sink)
 {
-    int16_t pcm[SWITCH_RECOMMENDED_BUFFER_SIZE];
-    size_t ns;
     if (!p || !data || !len || !sink) return;
     if (p->kind == ES_PROTO_GEMINI) {   /* Gemini Live delivers its JSON (control + audio) as BINARY
                                          * frames, not text — parse them through the text path */
@@ -772,8 +787,6 @@ void es_proto_on_binary(es_proto_ctx_t *p, const void *data, size_t len, const e
     if (p->kind == ES_PROTO_TWILIO || p->kind == ES_PROTO_OPENAI ||
         p->kind == ES_PROTO_ELEVENLABS) return;  /* audio is text-framed */
     if (p->kind == ES_PROTO_PIPECAT) { es_pipecat_on_binary(p, (const uint8_t *) data, len, sink); return; }
-    /* native + deepgram + vapi: raw codec-coded audio */
-    if (len > SWITCH_RECOMMENDED_BUFFER_SIZE) len = SWITCH_RECOMMENDED_BUFFER_SIZE;  /* clamp */
-    ns = es_decode(p->codec, (const uint8_t *) data, len, pcm);
-    if (ns != (size_t) -1 && ns) es_emit_audio(p, pcm, ns, sink);
+    /* native + deepgram + vapi: raw codec-coded audio, any length */
+    es_decode_chunked(p, p->codec, (const uint8_t *) data, len, sink);
 }
