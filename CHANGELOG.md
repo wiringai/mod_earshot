@@ -5,6 +5,11 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 
 ## [Unreleased]
 
+### Changed
+- Docs: new `docs/MODULE-VS-AGENT.md` explaining what module-side VAD is (energy endpointing, not a
+  turn model), when to leave it off (agents with their own VAD), and why edge latency metrics differ
+  from agent-side metrics; README/FEATURES/WHY say "VAD endpointing" instead of "turn detection".
+
 ## [0.4.0] — 2026-10-03
 
 ### Added

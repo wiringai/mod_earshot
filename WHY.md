@@ -26,9 +26,10 @@ workarounds. Earshot's `WRITE_REPLACE` path is validated with real audio, full d
    (OpenAI `realtime` subprotocol, ElevenLabs ping→pong, Gemini setup), and per-vendor barge-in signals are
    handled for you.
 
-2. **Turn-taking that works with *any* agent.** Module-side VAD (`switch_vad`) emits
+2. **Turn-taking that works with *any* agent.** Module-side VAD endpointing (`switch_vad`) emits
    `speech_started` / `speech_stopped`, opens a "ready gate" so callers never answer into silence,
-   and does **speech-triggered barge-in** — even for an agent that does no endpointing itself.
+   and does **speech-triggered barge-in** — for agents that do no endpointing themselves. Agents
+   that bring their own VAD leave it off ([docs/MODULE-VS-AGENT.md](docs/MODULE-VS-AGENT.md)).
 
 3. **The agent can drive the call.** An opt-in, whitelisted control channel turns LLM tool calls into
    real telephony: `transfer`, `hangup`, `send_dtmf`, `play`, `record`, `hold`, `bridge`, `setvar` —

@@ -21,7 +21,7 @@ tooling never delivered.
 | Transport | Full-duplex WebSocket (ws/wss), own service thread, never blocks the media path |
 | Protocols | `native`, `twilio`, `openai`, `deepgram`, `vapi`, `elevenlabs`, `gemini`, `pipecat`, `assemblyai` + `cartesia` (STT) |
 | Audio | G.711 µ-law/a-law + L16; transparent resampling 8 k ↔ 16 k ↔ 24 k |
-| Turn-taking | Module-side VAD + turn events, ready-gate, barge-in (`flush` / `clear`), Twilio mark echo |
+| Turn-taking | Module-side VAD endpointing + speech events, ready-gate, barge-in (`flush` / `clear`), Twilio mark echo |
 | Fan-out | Many named streams per channel (`id=`); `dir=in` read-only forks (transcription + supervisor) |
 | Call control | Agent-driven control channel (transfer, hangup, DTMF, play, record, …) |
 | DTMF & PCI | Caller DTMF capture + forward; maskable window mutes audio + redacts digits to the agent |
@@ -120,10 +120,13 @@ start ... interruptible=speech sensitivity=medium ignore_backchannel=on barge_fa
 
 The `barges` counter is surfaced in `earshot::metrics`.
 
-## 6. Turn detection — module-side VAD  ✓
+## 6. VAD endpointing — module-side  ✓
 
 Energy VAD (FreeSWITCH's native `switch_vad`, hangover-aware) runs on the caller's audio in the
 media tap, so **any** agent gets turn boundaries — even one that does no endpointing of its own.
+It is endpointing (speech, then `vad_silence_ms` of silence), not a turn-prediction model. Off by
+default, and meant to stay off for agents that run their own VAD; see
+[docs/MODULE-VS-AGENT.md](docs/MODULE-VS-AGENT.md).
 On each transition Earshot fires an event, sets `earshot_talking`, and can act on it:
 
 - **`earshot::speech_started` / `earshot::speech_stopped`** events (+ `earshot_talking=true|false` var).
