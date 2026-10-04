@@ -6,7 +6,7 @@
 
 > A FreeSWITCH module that streams live call audio to your AI agent over a WebSocket —
 > and plays the agent's voice back — full duplex, with ten ready-made protocol adapters,
-> module-side turn detection, agent-driven call control, PCI masking, multi-stream fan-out,
+> module-side VAD endpointing, agent-driven call control, PCI masking, multi-stream fan-out,
 > and built-in latency metrics.
 
 <p align="center">
@@ -33,14 +33,17 @@ duplex, on one leg. That's the wedge — everything else builds on it. The full 
 - **7 wire protocols, agent unmodified** — `native`, `twilio`, `openai` (Realtime),
   `deepgram` (Voice Agent), `vapi`, `elevenlabs`, `gemini` (Live), `pipecat`, `assemblyai` + `cartesia`
   (streaming STT). Swap vendors with one word.
-- **Turn-taking for any agent** — module-side VAD → `speech_started`/`speech_stopped`, a ready-gate
-  (no "answered into silence"), and speech-triggered barge-in.
+- **Turn-taking for any agent** — module-side VAD endpointing → `speech_started`/`speech_stopped`, a
+  ready-gate (no "answered into silence"), and speech-triggered barge-in. Off by default; leave it off
+  for agents that bring their own VAD (pipecat, Realtime APIs) — see
+  **[docs/MODULE-VS-AGENT.md](docs/MODULE-VS-AGENT.md)** for which side should do what.
 - **Agent drives the call** — opt-in, per-action control channel (`commands=play,hangup`): transfer,
   hangup, DTMF, play, record, hold, bridge, setvar — with every argument validated (app-exec, path
   traversal, and exec-triggering variables rejected), audited via `earshot::command`.
 - **PCI/PII masking** — mute audio + redact DTMF to the agent during card entry.
 - **Multi-stream fan-out** — agent + live transcription + supervisor on one call.
-- **Latency KPIs** — time-to-first-audio, per-turn response time, WebSocket RTT.
+- **Latency KPIs** — time-to-first-audio, per-turn response time, WebSocket RTT, measured at the
+  edge (what the caller hears), which agent-side metrics cannot see.
 - **Codecs + resampling** — G.711 µ-law/a-law + L16, transparent 8k/16k/24k.
 - **Built on libwebsockets** — the WebSocket transport rides the mature, high-performance
   [libwebsockets](https://libwebsockets.org) library (not a hand-rolled RFC-6455 client), on a
@@ -83,6 +86,11 @@ teams actually optimize:
 - **Per-turn response latency** (avg + max) — caller stops → agent starts; catch a slow model or vendor the moment it drifts.
 - **WebSocket RTT** — transport health, sampled via ping/pong.
 - **Throughput & backpressure** — tx/rx frames + bytes, play-buffer depth, queue drops, reconnects.
+
+These complement, not replace, your agent framework's own metrics: the agent knows which stage was
+slow, the module knows whether the caller felt it — including connect time, queuing in front of the
+agent, and dropped frames, none of which exist inside the agent process. The split is spelled out in
+[docs/MODULE-VS-AGENT.md](docs/MODULE-VS-AGENT.md).
 
 At one call it's a debugger; at ten thousand it's your **fleet latency scoreboard** — ship the events
 to Prometheus/OTel and alert on p95 time-to-first-audio *per vendor*. Every metric is keyed to the
