@@ -5,6 +5,20 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 
 ## [Unreleased]
 
+### Fixed
+- **No more seconds of silence before a transfer or hangup on a quiet box** (#29). When the
+  agent ended the call or asked for a transfer, FreeSWITCH could wait 5 to 10 s before the
+  bridge or BYE. The transport's service thread relied on the `lws_service` timeout to run
+  its housekeeping, and libwebsockets ignores that timeout: on a context whose only stream
+  had just closed, the thread slept with nothing to wake it and `es_ws_destroy` waited out
+  its whole bound. Other calls' audio on the same context hid it, so it showed with one call
+  or very few. The thread now arms a libwebsockets timer to bound its sleep; teardown takes
+  about 15 ms. Not specific to TLS or to a libwebsockets version (reproduced on 4.0.20,
+  4.1.6 and 4.3.3 over plain `ws://`).
+- **Reconnect works when the call is alone on its context.** For the same reason a stream
+  waiting on its reconnect backoff never retried after the second failed attempt unless
+  another stream's traffic woke the thread. Regression test for both: `test/test_ws_idle.c`.
+
 ## [0.4.1] — 2026-10-04
 
 ### Fixed
