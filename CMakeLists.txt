@@ -57,6 +57,22 @@ if(EARSHOT_TESTS)
     ${CMAKE_CURRENT_SOURCE_DIR}/test/support
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   add_test(NAME proto_audio COMMAND test_proto_audio)
+
+  # The WebSocket transport on a context with one stream and no traffic: teardown and
+  # reconnect must not depend on other streams' socket events. Needs libwebsockets (an
+  # in-process loopback server plays the agent); skipped where it is not installed.
+  find_package(PkgConfig)
+  if(PkgConfig_FOUND)
+    pkg_check_modules(LWS_TEST libwebsockets)
+  endif()
+  if(LWS_TEST_FOUND)
+    find_package(Threads REQUIRED)
+    add_executable(test_ws_idle test/test_ws_idle.c src/es_ws.c)
+    target_include_directories(test_ws_idle PRIVATE ${LWS_TEST_INCLUDE_DIRS})
+    target_link_directories(test_ws_idle PRIVATE ${LWS_TEST_LIBRARY_DIRS})
+    target_link_libraries(test_ws_idle PRIVATE ${LWS_TEST_LIBRARIES} Threads::Threads)
+    add_test(NAME ws_idle COMMAND test_ws_idle)
+  endif()
 endif()
 
 # --- the FreeSWITCH module (skipped gracefully if FS headers are absent) ----

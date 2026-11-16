@@ -100,6 +100,7 @@ typedef struct es_pool_ctx {
     es_ws_t            *list;    /* attached streams (via w->lnext) */
     es_ws_t            *arm_list;/* streams awaiting a writable arm (via w->arm_next) */
     long                last_walk_ms;  /* service thread only: housekeeping rate limit */
+    lws_sorted_usec_list_t tick;       /* service thread only: bounds the lws_service sleep */
 } es_pool_ctx_t;
 
 static struct {
@@ -398,18 +399,41 @@ static void es_connect(es_ws_t *w)
 }
 
 /* ---- pool service thread ----------------------------------------------- */
+/* Nothing to do: the timer exists so that its expiry returns lws_service. */
+static void es_tick_cb(lws_sorted_usec_list_t *sul) { (void) sul; }
+
 static void *es_pool_service(void *arg)
 {
     es_pool_ctx_t *p = (es_pool_ctx_t *) arg;
-    int gated = 0;
+    int gated = 0, closing = 0;
     while (p->running) {
-        /* When the previous iteration skipped the walk, an intent (a queued frame's
-         * transition wake, a stop, a start) may already be pending with its wake
-         * consumed — nothing else would wake an idle context for up to 50ms. Shorten
-         * the service timeout for exactly that window so the deferred walk runs
-         * within ~10ms instead. (Peer review: recurring ~50ms audio stall when a
-         * pong-phased wake landed in the gated window.) */
-        lws_service(p->ctx, gated ? 10 : 50);   /* woken early by lws_cancel_service */
+        int wait_ms = (gated || closing) ? 10 : 50, busy;
+        /* The walk below is what finishes a teardown, retries a connect after its
+         * backoff and sends pings, so it has to run on a clock. libwebsockets ignores a
+         * positive lws_service timeout and sleeps until a socket event, a wake or one of
+         * its own timers, so one of its timers is armed here to bound the sleep. Without
+         * it a context with a single stream slept on after that stream's connection
+         * closed: the close completes inside lws_service before it polls, the poll then
+         * has nothing left to wake it, and the walk that marks the stream done never
+         * ran. es_ws_destroy waited out its whole bound (seconds of silence before a
+         * transfer or hangup). A stream waiting on its reconnect backoff never retried
+         * for the same reason.
+         *
+         * The wait is 10ms instead of 50 in two windows. While a stream is closing, so
+         * its owner is released a tick after the connection is gone. And when the
+         * previous iteration skipped the walk: an intent (a queued frame's transition
+         * wake, a stop, a start) may already be pending with its wake consumed. (Peer
+         * review: recurring ~50ms audio stall when a pong-phased wake landed in the
+         * gated window.)
+         *
+         * A context with no streams and no deferred walk has nothing on a clock, so it
+         * is left to sleep until es_ws_start wakes it. */
+        pthread_mutex_lock(&p->mu);
+        busy = gated || p->list != NULL;
+        pthread_mutex_unlock(&p->mu);
+        if (busy)
+            lws_sul_schedule(p->ctx, 0, &p->tick, es_tick_cb, (lws_usec_t) wait_ms * LWS_US_PER_MS);
+        lws_service(p->ctx, wait_ms);   /* woken early by lws_cancel_service */
         long now = es_now_ms();
         es_ws_t *prev = NULL, *w;
         /* Rate-limit the housekeeping walk. Under load lws_service returns per socket
@@ -419,6 +443,7 @@ static void *es_pool_service(void *arg)
          * 10ms resolution, so cap it there; socket I/O itself is not delayed. */
         if (now - p->last_walk_ms < 10) { gated = 1; continue; }
         gated = 0;
+        closing = 0;
         p->last_walk_ms = now;
         pthread_mutex_lock(&p->mu);
         w = p->list;
@@ -432,6 +457,7 @@ static void *es_pool_service(void *arg)
                         lws_callback_on_writable(w->wsi);
                     }
                     /* wait for CLOSED to clear w->wsi, then finalize below */
+                    closing = 1;
                 } else {                      /* wsi released: finalize here, off lws_service */
                     if (w->in_arm) {          /* purge from the pending-arm list before any free */
                         es_ws_t **ap = &p->arm_list;
@@ -488,6 +514,8 @@ static void *es_pool_service(void *arg)
         }
         pthread_mutex_unlock(&p->mu);
     }
+    /* The context is destroyed after this thread is joined; leave no timer in it. */
+    lws_sul_schedule(p->ctx, 0, &p->tick, es_tick_cb, LWS_SET_TIMER_USEC_CANCEL);
     return NULL;
 }
 
@@ -593,6 +621,7 @@ static int es_pool_init(void)   /* lazy, once */
         p->list = NULL;
         p->arm_list = NULL;
         p->last_walk_ms = 0;   /* first walk always runs (reload hygiene) */
+        memset(&p->tick, 0, sizeof p->tick);
         p->ctx = lws_create_context(&info);
         if (!p->ctx) goto fail;
         p->running = 1;

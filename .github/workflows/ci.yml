@@ -7,17 +7,18 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Portable core (codec, backpressure queue, Pipecat protobuf) — no FreeSWITCH needed,
-  # so this runs everywhere and is the primary green signal.
+  # Portable core (codec, backpressure queue, Pipecat protobuf) and the WebSocket
+  # transport against a loopback server — no FreeSWITCH needed, so this runs everywhere
+  # and is the primary green signal.
   unit:
     name: unit tests (portable core)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libwebsockets-dev
       - name: Configure & build tests
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target test_codec test_pb test_cmdguard test_command_dispatch test_proto_audio --parallel
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target test_codec test_pb test_cmdguard test_command_dispatch test_proto_audio test_ws_idle --parallel
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
 
