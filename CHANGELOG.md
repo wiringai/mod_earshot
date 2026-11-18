@@ -5,7 +5,59 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-11-18
+
+A hardening release. Upgrade if agents you do not fully control can connect, if API keys
+travel in `EARSHOT_AUTH` / `EARSHOT_SESSION_CONFIG`, or if anyone ever runs
+`unload mod_earshot` or `reload mod_earshot` on a box with calls.
+
+### Security
+- **API keys no longer leak into events, CDRs and `uuid_dump`.** `EARSHOT_AUTH` (the
+  `Authorization` value) and `EARSHOT_SESSION_CONFIG` (vendor session JSON, often with keys and
+  the prompt) stayed on the channel after the stream had copied them. FreeSWITCH adds every
+  channel variable to channel events, so the keys went to every ESL listener in each
+  `earshot::*`, `MEDIA_BUG_*` and `CHANNEL_*` event until hangup, and into the XML/JSON CDR. Both
+  are now removed from the channel as soon as the stream has read them, before its first event.
+  On a test call: 29 events and the CDR carried the keys before, none after; the agent still
+  receives the header. It also means a credential set for one stream is no longer sent to the
+  next stream started on the same call (the transcription key reaching the supervisor socket in
+  a fan-out dialplan).
+- **URLs in events and replies are redacted.** The `url` header of `earshot::connected` and the
+  `-ERR could not open websocket` reply drop the query string (`?token=`, `?access_token=`) and
+  any `user:password@`; for `proto=vapi`, whose per-call URL is the credential, the path too.
+- **An agent can no longer stall or bloat the box by declaring a sample rate.** The rate on a
+  `streamAudio` message or a pipecat frame sized a resampler on the service thread that every
+  stream on that context shares. Four 8 KB frames declaring 1 to 3 Hz produced 181 MB of
+  "audio" and 120 MB of extra resident memory on a test call. Only 8000, 11025, 12000, 16000,
+  22050, 24000, 32000, 44100 and 48000 Hz are accepted; audio at any other rate is dropped and
+  logged once per stream.
+- **A long option name no longer crashes FreeSWITCH.** `start` copied each option's key into a
+  64-byte stack buffer using the key's own length; a key of 64 characters or more overran it
+  (a 500-character key killed the process). Operator input, but reachable from anything that
+  builds the command from call data.
+- **`unload mod_earshot` with live streams no longer crashes FreeSWITCH.** Unload freed the
+  transport under streams that were still running and unmapped the code their media callbacks
+  were executing. It now stops every stream first, exactly as `stop` would, and waits for each
+  to finish. The calls stay up without their agent, a warning says how many streams were
+  stopped, and the module can be loaded and used again. With three streaming calls, FreeSWITCH
+  died before; now the calls stay up through the unload, a reload and a fresh `start`.
+
 ### Fixed
+- **A reconnect starts clean.** Audio queued for a connection that was then lost used to be
+  sent on the next connection, ahead of the protocol preamble: Gemini closes the socket on
+  anything before `setup`, OpenAI received audio before `session.update`, a Twilio-dialect
+  agent got `media` before `connected`/`start`. Whatever was queued for the lost connection is
+  now dropped (and counted in `ws_queue_drops`), and the preamble is always the first thing a
+  connection carries. The same goes for DTMF, `send` text, turn notifications and command
+  results issued while there was no connection: they used to arrive on the next one, in front
+  of its preamble, and are now dropped. Messages sent before the very first connection are kept and follow the
+  preamble. A partly received message from the old connection is no longer glued to the first
+  message of the new one. Regression test: `test/test_ws_reconnect.c`.
+- **Long URLs are sent whole or refused.** The request path was cut at 511 bytes and the URL
+  at 1023 without any error, so a long signed URL lost its end. URLs up to 2000 bytes now
+  work, with `Authorization` and `X-Earshot-Meta` at full size; a longer one fails the `start`
+  with an error. 2000 is the bound because libwebsockets 4.1 and older cut the request line
+  at 2048 bytes themselves.
 - **No more seconds of silence before a transfer or hangup on a quiet box** (#29). When the
   agent ended the call or asked for a transfer, FreeSWITCH could wait 5 to 10 s before the
   bridge or BYE. The transport's service thread relied on the `lws_service` timeout to run
@@ -18,6 +70,27 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 - **Reconnect works when the call is alone on its context.** For the same reason a stream
   waiting on its reconnect backoff never retried after the second failed attempt unless
   another stream's traffic woke the thread. Regression test for both: `test/test_ws_idle.c`.
+
+### Changed
+- `EARSHOT_AUTH` and `EARSHOT_SESSION_CONFIG` are consumed by `start`, including one that is
+  refused (duplicate stream id, URL too long). A
+  dialplan that set them once and started several streams, or stopped and restarted a stream,
+  must set them again before each `start`, or set `EARSHOT_KEEP_CREDENTIAL_VARS=true` to keep
+  the old behaviour (and the old exposure). `EARSHOT_META` is not a credential and stays.
+- The `url` header of `earshot::connected` shows `?...` in place of a query string.
+- A URL whose host name is 256 bytes or longer is refused; it used to be cut.
+- `ws_queue_drops` also counts messages dropped because their connection was lost.
+- The docs said the outbound queue "buffers audio across a brief blip". It never did: caller
+  audio is sent only while connected. They now say what happens.
+
+### Known limits
+- The credential variables are on the channel from the moment the dialplan sets them until
+  `start` runs. Events in that window still carry them: with the usual `set` then `earshot`
+  pair, that is the `CHANNEL_EXECUTE` / `CHANNEL_EXECUTE_COMPLETE` of the `set` and the
+  `CHANNEL_EXECUTE` of `earshot`. Keep the `set` directly before the `start`.
+- A credential placed in the URL or in `auth=` is still visible in FreeSWITCH's own record of
+  the API command (the `API` / `BACKGROUND_JOB` events and the console log), which the module
+  does not control. Prefer `EARSHOT_AUTH`.
 
 ## [0.4.1] — 2026-10-04
 

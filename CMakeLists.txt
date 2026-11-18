@@ -34,6 +34,9 @@ if(EARSHOT_TESTS)
   add_executable(test_cmdguard test/test_cmdguard.c src/es_cmdguard.c)
   add_test(NAME cmdguard COMMAND test_cmdguard)
 
+  add_executable(test_util test/test_util.c)
+  add_test(NAME util COMMAND test_util)
+
   # Integration test: drives the REAL control-channel dispatch (command JSON ->
   # es_proto_on_text -> es_dispatch_command -> es_cmdguard -> sink) without FreeSWITCH,
   # via a test-only <switch.h> stub + minimal cJSON in test/support (scoped to this target
@@ -72,6 +75,14 @@ if(EARSHOT_TESTS)
     target_link_directories(test_ws_idle PRIVATE ${LWS_TEST_LIBRARY_DIRS})
     target_link_libraries(test_ws_idle PRIVATE ${LWS_TEST_LIBRARIES} Threads::Threads)
     add_test(NAME ws_idle COMMAND test_ws_idle)
+
+    # What a connection carries first (the protocol preamble, never audio queued for a
+    # connection that was lost) and how long a URL it can be opened with.
+    add_executable(test_ws_reconnect test/test_ws_reconnect.c src/es_ws.c)
+    target_include_directories(test_ws_reconnect PRIVATE ${LWS_TEST_INCLUDE_DIRS})
+    target_link_directories(test_ws_reconnect PRIVATE ${LWS_TEST_LIBRARY_DIRS})
+    target_link_libraries(test_ws_reconnect PRIVATE ${LWS_TEST_LIBRARIES} Threads::Threads)
+    add_test(NAME ws_reconnect COMMAND test_ws_reconnect)
   endif()
 endif()
 
@@ -102,13 +113,15 @@ if(FS_FOUND)
   endif()
   set_target_properties(mod_earshot PROPERTIES PREFIX "" OUTPUT_NAME "mod_earshot")
   target_include_directories(mod_earshot PRIVATE ${FS_INCLUDE_DIRS} ${LWS_INCLUDE_DIRS})
+  # FreeSWITCH built from source lives under its own prefix (/usr/local/freeswitch/lib)
+  target_link_directories(mod_earshot PRIVATE ${FS_LIBRARY_DIRS} ${LWS_LIBRARY_DIRS})
   target_link_libraries(mod_earshot PRIVATE ${FS_LIBRARIES} ${LWS_LIBRARIES})
   install(TARGETS mod_earshot LIBRARY DESTINATION "${FS_MOD_DIR}")
   message(STATUS "Earshot: building mod_earshot (FreeSWITCH found)")
 
   # --- .deb packaging (cpack --config build/CPackConfig.cmake -G DEB) ---------
   set(CPACK_PACKAGE_NAME "mod-earshot")
-  set(CPACK_PACKAGE_VERSION "0.4.1")
+  set(CPACK_PACKAGE_VERSION "0.4.2")
   set(CPACK_PACKAGE_CONTACT "Varun Pratap Singh")
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Earshot — FreeSWITCH <-> AI-agent audio bridge (mod_earshot)")
   set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/wiringai/mod_earshot")

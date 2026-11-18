@@ -96,6 +96,10 @@ are `dir=in` (read-only — they never fight the agent for playback).
 <action application="playback" data="silence_stream://-1"/>
 ```
 
+`EARSHOT_AUTH` belongs to the `start` right after it: the stream takes it off the channel once
+read, so the Deepgram key above goes to Deepgram only, not to the supervisor socket and not into
+the call's events or CDR. Set it again before any other stream that needs one.
+
 Manage each independently: `earshot <uuid> status id=transcribe`, `earshot <uuid> stop id=supervisor`.
 
 ## 6. PCI masking

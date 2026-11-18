@@ -4,6 +4,7 @@
 #include "es_proto.h"
 #include "es_pb.h"      /* Pipecat protobuf codec (pure C, unit-tested) */
 #include "es_cmdguard.h" /* control-channel argument validation (pure C, unit-tested) */
+#include "es_util.h"     /* agent sample-rate allowlist (pure C, unit-tested) */
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
@@ -17,6 +18,8 @@ struct es_proto_ctx {
     es_ws_t        *ws;         /* transport, for receive-path auto-responses (pong) */
     switch_audio_resampler_t *rs_out;  /* chan_rate -> rate (caller->agent), NULL if equal */
     switch_audio_resampler_t *rs_in;   /* rate_out -> chan_rate (agent->caller), NULL if equal */
+    int             bad_rate_warned;   /* an unsupported agent rate was already logged for this stream */
+    int             rs_in_failed;      /* no resampler could be built for rate_out: its audio is dropped */
     char            stream_sid[40];
     char            account_sid[40];
     char            call_sid[40];
@@ -382,6 +385,37 @@ static void es_emit_audio(es_proto_ctx_t *p, int16_t *pcm, size_t ns, const es_p
     }
 }
 
+/* The agent says its audio is at `hz`. Returns 1 when that audio can be played, having
+ * rebuilt the inbound resampler if the rate changed (rs_in is only touched on the receive
+ * thread). Returns 0 when the audio must be dropped: the rate is not one a speech service
+ * produces (see es_rate_supported for why it is not taken on trust), or no resampler could
+ * be built for it, in which case playing it would be the wrong pitch and speed. A rate of
+ * 0 means "not stated": keep the current one. */
+static int es_agent_rate(es_proto_ctx_t *p, long hz)
+{
+    if (hz == 0 || hz == p->rate_out) return !p->rs_in_failed;
+    if (!es_rate_supported(hz)) {
+        if (!p->bad_rate_warned) {
+            p->bad_rate_warned = 1;
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                "earshot: agent declared an unsupported sample rate (%ld Hz); dropping that audio. "
+                "Supported: 8000 11025 12000 16000 22050 24000 32000 44100 48000\n", hz);
+        }
+        return 0;
+    }
+    if (p->rs_in) switch_resample_destroy(&p->rs_in);
+    p->rate_out = (int) hz;
+    p->rs_in_failed = 0;
+    if (p->rate_out == p->chan_rate) return 1;
+    if (switch_resample_create(&p->rs_in, p->rate_out, p->chan_rate, 8192, SWITCH_RESAMPLE_QUALITY, 1)
+        != SWITCH_STATUS_SUCCESS) {
+        p->rs_in = NULL;       /* FreeSWITCH leaves a freed pointer behind on failure */
+        p->rs_in_failed = 1;   /* audio at this rate stays dropped until the agent changes rate */
+        return 0;
+    }
+    return 1;
+}
+
 /* Decode coded audio of any length and hand it to the sink in pieces that fit the
  * fixed decode buffer. Earlier versions clamped the input to one buffer (8 KB of
  * L16 = 256 ms at 16 kHz) and silently dropped the rest, which chopped any agent
@@ -708,16 +742,9 @@ void es_proto_on_text(es_proto_ctx_t *p, const char *data, size_t len, const es_
         cJSON *rate  = d ? cJSON_GetObjectItem(d, "sampleRate") : NULL;
         const char *k = (kind && kind->valuestring) ? kind->valuestring : "raw";
         if (audio && audio->valuestring && !strcasecmp(k, "raw")) {
-            /* raw = L16 at data.sampleRate; rebuild the inbound resampler on a change,
-             * as the pipecat path does (rs_in is only touched on this receive thread). */
-            int hz = rate ? rate->valueint : 0;
-            if (hz > 0 && p->rate_out != hz) {
-                p->rate_out = hz;
-                if (p->rs_in) switch_resample_destroy(&p->rs_in);
-                if (p->rate_out != p->chan_rate)
-                    switch_resample_create(&p->rs_in, p->rate_out, p->chan_rate, 8192, SWITCH_RESAMPLE_QUALITY, 1);
-            }
-            es_deliver_ulaw_b64(p, audio->valuestring, ES_CODEC_L16, sink);
+            /* raw = L16 at data.sampleRate (absent: the rate the stream was started with) */
+            if (es_agent_rate(p, rate ? (long) rate->valueint : 0))
+                es_deliver_ulaw_b64(p, audio->valuestring, ES_CODEC_L16, sink);
         }
         /* wav/mp3/ogg payloads are not decoded here: the compat path asks for raw L16 */
         cJSON_Delete(root);
@@ -762,16 +789,9 @@ static void es_pipecat_on_binary(es_proto_ctx_t *p, const uint8_t *data, size_t 
     if (es_pb_decode_frame(data, len, &f) != 0) return;        /* malformed -> drop safely */
     if (f.interrupted && sink->on_clear) sink->on_clear(sink->user);
     if (f.has_audio && f.audio_len) {
-        /* Honor the frame's declared rate: if the agent streams at a rate other than the
-         * one we assumed, rebuild the inbound resampler for it (only on change; rs_in is
-         * touched solely on this receive thread, so this is safe). */
-        if (f.sample_rate && (uint32_t) p->rate_out != f.sample_rate) {
-            p->rate_out = (int) f.sample_rate;
-            if (p->rs_in) switch_resample_destroy(&p->rs_in);
-            if (p->rate_out != p->chan_rate)
-                switch_resample_create(&p->rs_in, p->rate_out, p->chan_rate, 8192, SWITCH_RESAMPLE_QUALITY, 1);
-        }
-        es_decode_chunked(p, ES_CODEC_L16, f.audio, f.audio_len, sink);
+        /* the frame carries its own rate, which may differ from the one the stream assumed */
+        if (es_agent_rate(p, (long) f.sample_rate))
+            es_decode_chunked(p, ES_CODEC_L16, f.audio, f.audio_len, sink);
     }
 }
 

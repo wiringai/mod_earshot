@@ -25,9 +25,12 @@
 #include <unistd.h>
 #include <time.h>
 
+#include "es_util.h"   /* ES_URL_MAX */
+
 /* Upper bound on a single reassembled inbound message (runaway/hostile guard). */
 #define ES_WS_MAX_MSG (4u * 1024u * 1024u)
 #define ES_POOL_MAX   16     /* hard cap on service contexts */
+#define ES_HANDSHAKE_BUF (ES_URL_MAX + 8192)   /* URL + every header we add, with room to spare */
 #define ES_STABLE_MS  5000   /* a connection must stay up this long before backoff resets,
                               * so a flapping (accept-then-close) endpoint keeps backing off */
 #define ES_PING_MS    5000   /* send a WebSocket ping this often while connected */
@@ -58,6 +61,10 @@ struct es_ws {
     struct lws             *wsi;     /* current connection (service thread) */
     pthread_mutex_t         mu;      /* guards the queue + the metrics fields */
     es_ws_msg_t            *head, *tail;   /* FIFO outbound queue (both under w->mu) */
+    es_ws_msg_t            *pre_head, *pre_tail; /* what the owner sends from its connected callback [w->mu] */
+    size_t                  pre_bytes;     /* [w->mu] */
+    int                     pre_on;        /* the connected callback is running on pre_thread [w->mu] */
+    pthread_t               pre_thread;
     _Atomic int             have_queued;   /* queue non-empty; read lock-free by the service thread */
     size_t                  queued_bytes;
     size_t                  max_queue_bytes;
@@ -69,6 +76,7 @@ struct es_ws {
     volatile int            orphaned;     /* owner gave up waiting; service frees    [p->mu] */
     int                     kill;         /* force-close the wsi (service thread only) */
     _Atomic int             suppress_events; /* mute owner callbacks once teardown starts */
+    int                     ever_connected; /* a connection was established at least once (service thread) */
     int                     backoff_ms;
     long                    next_reconnect_ms;
     long                    connected_since_ms;   /* when the current link established (0 if down) */
@@ -86,7 +94,7 @@ struct es_ws {
     int                     rx_drop;
     /* parsed url */
     char                    host[256];
-    char                    path[512];
+    char                   *path;         /* owned; as long as the URL needs (see ES_URL_MAX) */
     int                     port;
     int                     use_tls;
 };
@@ -123,6 +131,15 @@ static int es_enqueue(es_ws_t *w, const void *data, size_t len, int binary)
     memcpy(m->buf + LWS_PRE, data, len);
 
     pthread_mutex_lock(&w->mu);
+    if (w->pre_on && pthread_equal(pthread_self(), w->pre_thread)) {
+        /* sent by the owner from inside its connected callback: the preamble. It is kept
+         * apart and put at the head of the queue when the callback returns (ESTABLISHED). */
+        if (w->pre_tail) w->pre_tail->next = m; else w->pre_head = m;
+        w->pre_tail = m;
+        w->pre_bytes += len;
+        pthread_mutex_unlock(&w->mu);
+        return 0;
+    }
     if (w->tail) w->tail->next = m; else w->head = m;
     w->tail = m;
     w->queued_bytes += len;
@@ -170,13 +187,59 @@ static void es_drain(es_ws_t *w)
     while ((m = es_dequeue(w))) free(m);
 }
 
+/* Lift the whole queue out, leaving it empty. The caller owns the returned chain. */
+static es_ws_msg_t *es_queue_take(es_ws_t *w, es_ws_msg_t **tail, size_t *bytes)
+{
+    es_ws_msg_t *head;
+    pthread_mutex_lock(&w->mu);
+    head = w->head; *tail = w->tail; *bytes = w->queued_bytes;
+    w->head = w->tail = NULL; w->queued_bytes = 0; w->have_queued = 0;
+    pthread_mutex_unlock(&w->mu);
+    return head;
+}
+
+/* The owner's connected callback has returned. In one step, so that no other thread's
+ * message can land in between: the preamble it sent becomes the head of the queue, and what
+ * the queue held is either kept behind it (`keep`, the first connection) or handed back to
+ * the caller to discard (a reconnect: all of it was meant for a connection that is gone). */
+static es_ws_msg_t *es_queue_lead_with_preamble(es_ws_t *w, int keep)
+{
+    es_ws_msg_t *stale = NULL;
+    pthread_mutex_lock(&w->mu);
+    w->pre_on = 0;
+    if (!keep) { stale = w->head; w->head = w->tail = NULL; w->queued_bytes = 0; }
+    if (w->pre_head) {
+        w->pre_tail->next = w->head;
+        if (!w->tail) w->tail = w->pre_tail;
+        w->head = w->pre_head;
+        w->queued_bytes += w->pre_bytes;
+        w->pre_head = w->pre_tail = NULL; w->pre_bytes = 0;
+    }
+    w->have_queued = w->head != NULL;
+    pthread_mutex_unlock(&w->mu);
+    return stale;
+}
+
+/* Free a chain that will never be sent, counting it as dropped. */
+static void es_queue_discard(es_ws_t *w, es_ws_msg_t *head)
+{
+    uint64_t n = 0;
+    while (head) { es_ws_msg_t *next = head->next; free(head); head = next; n++; }
+    if (!n) return;
+    pthread_mutex_lock(&w->mu);
+    w->queue_drops += n;
+    pthread_mutex_unlock(&w->mu);
+}
+
 /* Free everything owned by a stream. Called by exactly one thread per stream: the
  * owner (es_ws_destroy) if it reclaimed the stream, otherwise the service thread
  * once it finishes teardown. Never called while a wsi still references w. */
 static void es_free_full(es_ws_t *w)
 {
     es_drain(w);
+    while (w->pre_head) { es_ws_msg_t *n = w->pre_head->next; free(w->pre_head); w->pre_head = n; }
     free(w->rx);
+    free(w->path);
     if (w->pool) pthread_mutex_destroy(&w->mu);   /* mu is only initialised once started */
     free((void *) w->o.url);
     free((void *) w->o.auth);
@@ -225,13 +288,33 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
 
     case LWS_CALLBACK_CLIENT_ESTABLISHED:
         if (!w) break;
-        w->connected = 1;
         w->connected_since_ms = es_now_ms();   /* backoff resets only once this proves stable */
         w->last_rx_ms = w->connected_since_ms; /* liveness clock starts now */
         w->last_ping_ms = 0;
-        /* Gate on suppress_events like every other callback: a wsi that establishes
-         * after teardown began (the orphan window) must not call into freed owner state. */
+        /* The first thing a new connection carries must be whatever the owner sends from
+         * its connected callback: the protocol preamble (OpenAI session.update, Twilio
+         * connected/start, Gemini setup). While the callback runs, what this thread sends
+         * is collected apart from the queue (es_enqueue); when it returns the preamble is
+         * put at the head and the rest is decided:
+         *   - first connection: messages sent before the agent was reachable follow the
+         *     preamble;
+         *   - a reconnect: whatever is queued was meant for a connection that is gone
+         *     (audio the old socket never took, replies to a session that no longer
+         *     exists, anything sent while there was no connection), and the new session
+         *     must not start with it. It is dropped and counted.
+         * `connected` goes up last, so the media thread, which sends audio only while
+         * connected, does not start until the preamble is in place.
+         *
+         * Gate the callback on suppress_events like every other one: a wsi that
+         * establishes after teardown began (the orphan window) must not call into freed
+         * owner state. */
+        pthread_mutex_lock(&w->mu);
+        w->pre_thread = pthread_self(); w->pre_on = 1;
+        pthread_mutex_unlock(&w->mu);
         if (!w->suppress_events && w->o.on_event) w->o.on_event(w->o.user, 1, 0, "established");
+        es_queue_discard(w, es_queue_lead_with_preamble(w, !w->ever_connected));
+        w->ever_connected = 1;
+        w->connected = 1;
         if (w->have_queued) lws_callback_on_writable(wsi);
         break;
 
@@ -318,6 +401,16 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
         if (!w) break;
         w->connected = 0;
         w->wsi = NULL;
+        /* Half of a message from the connection that just ended must not be glued to the
+         * front of the next connection's first message. */
+        w->rx_len = 0; w->rx_drop = 0;
+        /* What was queued for that connection is stale from here on. Dropping it now
+         * frees the memory during a long outage; ESTABLISHED drops whatever is queued
+         * between now and the reconnect. */
+        if (w->ever_connected) {
+            es_ws_msg_t *tail; size_t bytes;
+            es_queue_discard(w, es_queue_take(w, &tail, &bytes));
+        }
         if (!w->suppress_events && w->o.on_event) {
             int code = (reason == LWS_CALLBACK_CLIENT_CONNECTION_ERROR) ? -1 : 0;
             w->o.on_event(w->o.user, 0, code,
@@ -617,6 +710,12 @@ static int es_pool_init(void)   /* lazy, once */
         if (g_tls_client_key)  info.client_ssl_private_key_filepath = g_tls_client_key;
         if (g_tls_ca)          info.client_ssl_ca_filepath          = g_tls_ca;
         info.user = p;   /* EVENT_WAIT_CANCELLED broadcast -> find our pool ctx */
+        /* libwebsockets builds the client handshake (request line, then our headers) in
+         * one per-thread buffer and keeps the request URI with the parsed headers; both
+         * default to 4096 bytes, which a long URL plus Authorization and X-Earshot-Meta
+         * overruns, failing the connect. Size them for the longest URL a stream may use. */
+        info.pt_serv_buf_size     = ES_HANDSHAKE_BUF;
+        info.max_http_header_data = ES_HANDSHAKE_BUF;
         pthread_mutex_init(&p->mu, NULL);
         p->list = NULL;
         p->arm_list = NULL;
@@ -675,9 +774,12 @@ es_ws_t *es_ws_create(const es_ws_opts_t *opts)
 {
     es_ws_t *w;
     const char *prot, *ads, *path; int port;
-    char tmp[1024];
+    char *tmp;
+    size_t plen;
 
-    if (!opts || !opts->url) return NULL;
+    /* A URL is used whole or not at all: cutting one short would connect to a different
+     * resource (or drop the token at its end) without anyone being told. */
+    if (!opts || !opts->url || strlen(opts->url) > ES_URL_MAX) return NULL;
     w = calloc(1, sizeof(*w));
     if (!w) return NULL;
 
@@ -695,12 +797,17 @@ es_ws_t *es_ws_create(const es_ws_opts_t *opts)
     w->max_queue_bytes = opts->max_queue_bytes > 0 ? (size_t) opts->max_queue_bytes : 262144;
     w->rng = (unsigned) ((size_t) w ^ (size_t) opts->url);
 
-    strncpy(tmp, opts->url, sizeof tmp - 1); tmp[sizeof tmp - 1] = 0;
-    if (lws_parse_uri(tmp, &prot, &ads, &port, &path) != 0) { es_ws_destroy(w); return NULL; }
+    tmp = strdup(opts->url);                 /* lws_parse_uri cuts its argument up in place */
+    if (!tmp || lws_parse_uri(tmp, &prot, &ads, &port, &path) != 0 || strlen(ads) >= sizeof w->host) {
+        free(tmp); es_ws_destroy(w); return NULL;
+    }
     w->use_tls = (!strcasecmp(prot, "wss") || !strcasecmp(prot, "https"));
     w->port = port;
     snprintf(w->host, sizeof w->host, "%s", ads);
-    snprintf(w->path, sizeof w->path, "/%s", path);
+    plen = strlen(path) + 2;
+    if ((w->path = malloc(plen))) snprintf(w->path, plen, "/%s", path);
+    free(tmp);
+    if (!w->path) { es_ws_destroy(w); return NULL; }
 
     return w;
 }
