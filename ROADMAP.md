@@ -38,8 +38,8 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
 ## Tier 1 — Reliability (why people switch)
 
 - ☑ Reconnect with exponential backoff **+ jitter** (`es_ws.c`); the outbound queue is now
-  **bounded (drop-oldest)** — buffers audio across a brief reconnect, drops on a long outage so
-  it can't grow unbounded or replay stale audio.
+  **bounded (drop-oldest)**; a reconnect drops what was queued for the lost connection and
+  starts with the protocol preamble (0.4.2: it used to replay that audio ahead of the preamble).
 - ◐ Backpressure policy — queue done + unit-tested; ☑ outbound WS queue bounded; ☐ wire `jitter=drop|block` into the media path
 - ☑ **Ready gate**: `ready=firstframe|connect|manual` (default firstframe) holds playback until the
   agent's first audio frame; fires `earshot::ready` + sets `earshot_ready=true` so the dialplan can

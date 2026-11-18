@@ -102,6 +102,40 @@ int main(void)
         es_proto_destroy(p);
     }
 
+    /* --- a rate the agent declares is checked before it reaches the resampler ---
+     * The declared rate sizes a resampler on the service thread every stream shares; 1 Hz
+     * asks for an 8000:1 upsample. Such a frame is dropped (once logged), the stream keeps
+     * its rate, and the next good frame plays. */
+    {
+        es_proto_ctx_t *p = es_proto_create(ES_PROTO_PIPECAT, ES_CODEC_L16, 16000, 16000, "c", "u", 0);
+        static const uint32_t hostile[] = { 1, 7999, 96000, 2000000000u, 4294967295u };
+        size_t n = 320, flen, i; int16_t pcm[320]; uint8_t frame[1024];
+        int creates = stub_resample_creates, logs = stub_log_lines;
+        for (i = 0; i < n; i++) pcm[i] = (int16_t) (i * 7);
+
+        for (i = 0; i < sizeof hostile / sizeof *hostile; i++) {
+            flen = es_pb_encode_audio(frame, sizeof frame, (const uint8_t *) pcm, n * 2, hostile[i]);
+            reset(); es_proto_on_binary(p, frame, flen, &sink);
+            CHECK(ngot == 0, "audio declared at %u Hz was played (%zu samples)", hostile[i], ngot);
+        }
+        CHECK(stub_resample_creates == creates, "a resampler was built for a hostile rate");
+        CHECK(stub_log_lines == logs + 1, "expected one warning for the stream, got %d", stub_log_lines - logs);
+
+        flen = es_pb_encode_audio(frame, sizeof frame, (const uint8_t *) pcm, n * 2, 16000);
+        reset(); es_proto_on_binary(p, frame, flen, &sink);
+        CHECK(ngot == n && ramp_ok(got, ngot), "the stream's own rate stopped working after a hostile frame");
+
+        /* a real change of rate still rebuilds the resampler, for exactly that rate */
+        flen = es_pb_encode_audio(frame, sizeof frame, (const uint8_t *) pcm, n * 2, 24000);
+        reset(); es_proto_on_binary(p, frame, flen, &sink);
+        CHECK(stub_resample_creates == creates + 1 && stub_resample_from == 24000,
+              "24 kHz audio: expected one resampler from 24000, got %d from %d",
+              stub_resample_creates - creates, stub_resample_from);
+        CHECK(ngot == n, "24 kHz audio was dropped");
+        printf("  hostile agent sample rates dropped, supported rates still play\n");
+        es_proto_destroy(p);
+    }
+
     free(got);
     printf(fails ? "proto_audio: %d FAILURE(S)\n" : "proto_audio: all passed\n", fails);
     return fails ? 1 : 0;

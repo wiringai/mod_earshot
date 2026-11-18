@@ -11,7 +11,8 @@ to memorize, and new options never shift an existing one.
 ## Verbs
 
 ### `start <url> [key=value …]`
-Begin streaming the channel's audio to `url` (`ws://` or `wss://`).
+Begin streaming the channel's audio to `url` (`ws://` or `wss://`, at most 2000 bytes; a longer
+URL is refused with an error, never shortened).
 
 | Option | Values | Default | Notes |
 |---|---|---|---|
@@ -162,9 +163,16 @@ the `EARSHOT_SESSION_CONFIG` channel variable; otherwise Earshot sends an audio-
 
 ## Channel variables
 
+`EARSHOT_AUTH` and `EARSHOT_SESSION_CONFIG` usually hold API keys, and FreeSWITCH copies every
+channel variable into the call's events and its CDR. Each `start` therefore takes them off the
+channel once it has read them: set them immediately before the `start` they are for, once per
+stream.
+
 | Variable | Purpose |
 |---|---|
-| `EARSHOT_SESSION_CONFIG` | verbatim first message for openai/deepgram/gemini/elevenlabs |
+| `EARSHOT_AUTH` | `Authorization` header value, spaces allowed (`Bearer <key>`). **Removed from the channel by the `start` that reads it** |
+| `EARSHOT_SESSION_CONFIG` | verbatim first message for openai/deepgram/gemini/elevenlabs. **Removed from the channel by the `start` that reads it** |
+| `EARSHOT_KEEP_CREDENTIAL_VARS` | `true` leaves the two variables above on the channel after `start` (they then appear in every event and in the CDR) |
 | `EARSHOT_META` | opaque caller context → `X-Earshot-Meta` handshake header (see [Caller context](#caller-context)) |
 | `EARSHOT_GREETING` | welcome-audio file path (alternative to `greeting=` for paths with spaces) |
 | `EARSHOT_NO_RECONNECT` | disable auto-reconnect (default: reconnect with jittered backoff) |

@@ -17,7 +17,8 @@
 #include <switch.h>
 #include "es_codec.h"   /* es_codec_t + G.711/L16 (unit-tested) */
 #include "es_ws.h"      /* WebSocket transport (bounded outbound queue lives here) */
-#include "es_proto.h"   /* protocol adapters: native / twilio / ... */
+#include "es_proto.h"
+#include "es_util.h"    /* URL limit + redaction, option-key split (pure C, unit-tested) */   /* protocol adapters: native / twilio / ... */
 
 #define EARSHOT_EVENT_CONNECTED    "earshot::connected"
 #define EARSHOT_EVENT_DISCONNECTED "earshot::disconnected"
@@ -119,7 +120,7 @@ typedef struct es_chan {
 
 typedef struct es_stream {
     switch_core_session_t *session;    /* owning session (WS thread is joined before it is torn down) */
-    char             url[1024];
+    char             url[ES_URL_MAX + 1];
     es_codec_t       codec;
     int              rate;          /* negotiated wire rate */
     es_dir_t         dir;
@@ -173,6 +174,7 @@ typedef struct es_stream {
     uint64_t         play_in, play_out;        /* bytes queued to / consumed from play_buf (play_mutex) */
     switch_time_t    play_last;                /* last tick that substituted agent audio (ES_LOAD/STORE) */
     struct es_stream *chan_next;    /* next stream on this channel (es_chan_t list) */
+    struct es_stream *live_next;    /* next live stream in the module (g_live, under g_live_mu) */
 
     /* welcome greeting: a file preloaded at channel rate, dropped into the playout the moment
      * the ready-gate opens so it leads the agent's first words (see the ready-announce block) */
@@ -206,6 +208,39 @@ typedef struct es_stream {
 /* --------------------------------------------------------------------------
  * Helpers
  * -------------------------------------------------------------------------- */
+
+/* Every stream that has a media bug attached, across all channels. The module cannot be
+ * unloaded from under them: the bug callbacks are this module's code and each stream holds
+ * a transport handle that the unload frees. Shutdown walks this list and stops each stream
+ * first (es_stop_all_streams). A stream is on the list from the moment its bug is attached
+ * until its CLOSE callback has finished with the transport. */
+static switch_mutex_t *g_live_mu;
+static es_stream_t    *g_live;
+
+static void es_live_add(es_stream_t *st)
+{
+    switch_mutex_lock(g_live_mu);
+    st->live_next = g_live; g_live = st;
+    switch_mutex_unlock(g_live_mu);
+}
+
+static void es_live_remove(es_stream_t *st)
+{
+    es_stream_t **pp;
+    switch_mutex_lock(g_live_mu);
+    for (pp = &g_live; *pp; pp = &(*pp)->live_next)
+        if (*pp == st) { *pp = st->live_next; st->live_next = NULL; break; }
+    switch_mutex_unlock(g_live_mu);
+}
+
+/* The stream's URL in a form that can go into an event, a log line or an API reply: the
+ * query string and any user:password are removed, and for vapi, whose per-call URL is the
+ * credential, the path as well. Events are copied to every ESL listener and into logs. */
+static const char *es_url_for_display(es_stream_t *st, char *out, size_t olen)
+{
+    es_url_redact(st->url, st->proto == ES_PROTO_VAPI, out, olen);
+    return out;
+}
 
 /* Fire an earshot:: custom event carrying the channel uuid (+ optional body). */
 static void es_fire_event(switch_core_session_t *session, const char *subclass,
@@ -374,11 +409,9 @@ static const char *es_privkey(switch_core_session_t *session, const char *id)
 /* Parse one key=value option into the stream config. Returns SWITCH_TRUE if consumed. */
 static switch_bool_t es_apply_option(es_stream_t *st, const char *kv)
 {
-    char key[64] = {0}, *eq = strchr(kv, '=');
-    const char *val;
-    if (!eq) return SWITCH_FALSE;
-    switch_copy_string(key, kv, (switch_size_t)(eq - kv) + 1);
-    val = eq + 1;
+    char key[64];
+    const char *val = es_opt_split(kv, key, sizeof key);   /* a key longer than the buffer is cut, never overruns it */
+    if (!val) return SWITCH_FALSE;
 
     if (!strcasecmp(key, "codec")) {
         st->codec = es_codec_from_name(val);   /* es_codec.h */
@@ -1035,6 +1068,7 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
             if (st->play_buf) switch_buffer_destroy(&st->play_buf);
             switch_mutex_unlock(st->play_mutex);
         }
+        es_live_remove(st);   /* last: until here an unload must wait for this stream */
         break;
     }
 
@@ -1047,15 +1081,52 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
 /* --------------------------------------------------------------------------
  * Subcommand handlers (stubs)
  * -------------------------------------------------------------------------- */
+static switch_status_t es_start_stream(switch_core_session_t *session, int argc, char **argv, switch_stream_handle_t *stream);
+
+/* Take the credentials a stream was started with off the channel.
+ *
+ * EARSHOT_AUTH holds an Authorization value ("Bearer sk-...") and EARSHOT_SESSION_CONFIG
+ * the vendor session JSON, which often carries keys and the whole prompt. Left on the
+ * channel they are copied into every event the call fires from then on (FreeSWITCH adds
+ * all channel variables to channel events, and so do earshot's own events), into the XML
+ * and JSON CDRs, and into uuid_dump: every ESL listener and every CDR store would hold the
+ * keys. The stream keeps its own copies, so they are removed as soon as those are made:
+ * before the media bug is attached, because attaching it fires the first such event.
+ *
+ * A dialplan that starts several streams from one `set` can keep them with
+ * EARSHOT_KEEP_CREDENTIAL_VARS=true, and then owns keeping its events and CDRs private. */
+static void es_scrub_credentials(switch_channel_t *channel)
+{
+    if (switch_true(switch_channel_get_variable(channel, "EARSHOT_KEEP_CREDENTIAL_VARS"))) return;
+    switch_channel_set_variable(channel, "EARSHOT_AUTH", NULL);
+    switch_channel_set_variable(channel, "EARSHOT_SESSION_CONFIG", NULL);
+}
+
 static switch_status_t es_start(switch_core_session_t *session, int argc, char **argv, switch_stream_handle_t *stream)
+{
+    switch_status_t status = es_start_stream(session, argc, argv, stream);
+    /* again here for a start that was refused before it read them: the credentials go
+     * whether or not the stream came up, and a caller that retries sets them again */
+    es_scrub_credentials(switch_core_session_get_channel(session));
+    return status;
+}
+
+static switch_status_t es_start_stream(switch_core_session_t *session, int argc, char **argv, switch_stream_handle_t *stream)
 {
     switch_channel_t *channel = switch_core_session_get_channel(session);
     switch_memory_pool_t *pool = switch_core_session_get_pool(session);
     es_stream_t *st;
     const char *cid;
+    char shown[256];
     int i;
 
     if (argc < 3) { stream->write_function(stream, "-ERR usage: %s\n", EARSHOT_SYNTAX); return SWITCH_STATUS_FALSE; }
+    /* A URL is used whole or not at all: cut short it would reach a different resource, or
+     * lose the token at its end, and the call would fail somewhere far from the cause. */
+    if (strlen(argv[2]) > ES_URL_MAX) {
+        stream->write_function(stream, "-ERR url is %d bytes; the limit is %d\n", (int) strlen(argv[2]), ES_URL_MAX);
+        return SWITCH_STATUS_FALSE;
+    }
 
     st = switch_core_alloc(pool, sizeof(*st));   /* pool alloc zeroes */
     st->session = session;
@@ -1141,6 +1212,7 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
                                         switch_core_session_get_uuid(session),
                                         switch_channel_get_variable(channel, "EARSHOT_SESSION_CONFIG"));
         es_proto_set_setvar_allow(st->proto_ctx, st->setvar_allow);  /* borrowed; st outlives the ctx */
+        es_scrub_credentials(channel);   /* both are copied now (st->auth above, the config just here) */
 
         /* module-side VAD runs on the channel-rate read stream */
         if (st->vad_on && (st->vad = switch_vad_init(chan_rate, 1))) {
@@ -1210,7 +1282,7 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
         st->ws = es_ws_create(&o);
         if (st->ws) es_proto_set_ws(st->proto_ctx, st->ws);   /* enable receive-path pong (elevenlabs) */
         if (!st->ws || es_ws_start(st->ws) != 0) {
-            stream->write_function(stream, "-ERR could not open websocket to %s\n", st->url);
+            stream->write_function(stream, "-ERR could not open websocket to %s\n", es_url_for_display(st, shown, sizeof shown));
             if (st->ws) { es_ws_destroy(st->ws); st->ws = NULL; }
             es_proto_destroy(st->proto_ctx); st->proto_ctx = NULL;
             if (st->play_buf) switch_buffer_destroy(&st->play_buf);
@@ -1231,8 +1303,10 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
         st->chan_next = ch->head; ch->head = st;
         switch_mutex_unlock(ch->mu);
     }
+    es_live_add(st);   /* before the bug exists, so an unload can never miss a stream whose callbacks may run */
     if (switch_core_media_bug_add(session, es_privkey(session, st->id), NULL, es_media_bug_cb, st, 0,
                                   st->bug_flags, &st->bug) != SWITCH_STATUS_SUCCESS) {
+        es_live_remove(st);
         es_chan_unlink(channel, st);
         stream->write_function(stream, "-ERR could not attach media bug\n");
         es_ws_destroy(st->ws); st->ws = NULL;
@@ -1243,7 +1317,7 @@ static switch_status_t es_start(switch_core_session_t *session, int argc, char *
     switch_channel_set_private(channel, es_privkey(session, st->id), st);
     /* register the caller-DTMF hook once per channel — on the default (unnamed) stream */
     if (!st->id[0]) { st->owns_dtmf_hook = SWITCH_TRUE; switch_core_event_hook_add_recv_dtmf(session, es_dtmf_hook); }
-    es_fire_event(session, EARSHOT_EVENT_CONNECTED, "url", st->url);
+    es_fire_event(session, EARSHOT_EVENT_CONNECTED, "url", es_url_for_display(st, shown, sizeof shown));
     stream->write_function(stream, "+OK stream '%s' started\n", st->id[0] ? st->id : "default");
     return SWITCH_STATUS_SUCCESS;
 }
@@ -1519,6 +1593,9 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_earshot_load)
 
     *module_interface = switch_loadable_module_create_module_interface(pool, modname);
 
+    switch_mutex_init(&g_live_mu, SWITCH_MUTEX_NESTED, pool);
+    g_live = NULL;
+
     /* Build the shared WS service-thread pool NOW, not lazily on the first call:
      * lazy init ran inside that call's session thread and cost it ~1s of caller
      * audio while the pool contexts were created (measured: first call after load
@@ -1590,8 +1667,64 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_earshot_load)
     return SWITCH_STATUS_SUCCESS;
 }
 
+/* Stop every live stream, as `earshot <uuid> stop` would, and return once each one's CLOSE
+ * callback has run. Called at unload, before anything the streams use is torn down.
+ *
+ * Removing the media bug is what makes this safe: FreeSWITCH takes the session's bug lock
+ * for writing, so a callback in flight on the media thread finishes first and none starts
+ * afterwards, and CLOSE runs on this thread, destroying the stream's transport handle while
+ * the service pool is still up. By the time the module's code is unmapped no call has a
+ * reason to enter it. The calls themselves stay up; they lose their agent audio.
+ *
+ * New streams cannot appear meanwhile: FreeSWITCH unregisters the module's API and
+ * application before calling shutdown and waits for calls into them to return. A session
+ * that cannot be located is already hanging up, and its own teardown removes the stream;
+ * that is waited for, with a bound in case a session is stuck. */
+static void es_stop_all_streams(void)
+{
+    int stopped = 0, waits = 0;
+    for (;;) {
+        char uuid[64] = "", id[64] = "";
+        switch_core_session_t *session;
+        es_stream_t *st;
+
+        switch_mutex_lock(g_live_mu);
+        if (g_live) {
+            switch_copy_string(uuid, g_live->uuid, sizeof uuid);
+            switch_copy_string(id, g_live->id, sizeof id);
+        }
+        switch_mutex_unlock(g_live_mu);
+        if (!uuid[0]) break;
+
+        if ((session = switch_core_session_locate(uuid))) {
+            switch_channel_t *channel = switch_core_session_get_channel(session);
+            int gone = 0;
+            if ((st = (es_stream_t *) switch_channel_get_private(channel, es_privkey(session, id)))) {
+                switch_core_media_bug_remove(session, &st->bug);   /* runs CLOSE here: unlinks st from g_live */
+                switch_mutex_lock(g_live_mu);
+                gone = g_live != st;   /* still listed: the call's own hangup is running its CLOSE */
+                switch_mutex_unlock(g_live_mu);
+            }
+            switch_core_session_rwunlock(session);
+            if (gone) { stopped++; waits = 0; continue; }
+        }
+        /* hanging up, or between attach and registration: its own thread finishes the job */
+        if (++waits > 500) {   /* 5 s */
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+                "mod_earshot: a stream on %s did not stop within 5 s; unloading anyway\n", uuid);
+            break;
+        }
+        switch_yield(10000);
+    }
+    if (stopped)
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+            "mod_earshot: stopped %d live stream%s for unload; those calls stay up without their agent\n",
+            stopped, stopped == 1 ? "" : "s");
+}
+
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_earshot_shutdown)
 {
+    es_stop_all_streams();   /* first: everything below is still in use by a live stream */
     {   /* stop the command workers before unmap: signal drain, push a sentinel per queue, join.
          * The worker frees every job it pops (including those it drains), so nothing leaks; a
          * worker busy in switch_api_execute finishes it, then pops the sentinel and exits. */

@@ -46,6 +46,13 @@ at it — but the module still treats agent input defensively:
   Media arguments cannot contain `::`, which also rejects IPv6-literal URLs (`http://[2001:db8::1]/x.wav`).
 - **PCI/PII masking** (`mask on`) mutes caller audio and redacts DTMF to the agent; the digit value is
   never placed in the `earshot::dtmf` audit event during a masking window.
+- **Credentials**: pass keys in the `EARSHOT_AUTH` / `EARSHOT_SESSION_CONFIG` channel variables.
+  They are removed from the channel when the stream starts, so they do not reach events, CDRs
+  or `uuid_dump` (unless `EARSHOT_KEEP_CREDENTIAL_VARS=true`). A key in the URL or in `auth=` is
+  redacted in earshot's own events but still appears in FreeSWITCH's record of the API command.
+- **Untrusted agents**: what an agent sends is bounded (message size, declared sample rate,
+  command arguments), but an agent you do not control should still get `commands=` narrowed to
+  the actions it needs.
 - **Transport**: use `wss://` for agents across a network. `auth=<token>` (or the `EARSHOT_AUTH`
   channel variable for a value containing a space, e.g. `Bearer <key>`) sets the `Authorization`
   header. For **mutual TLS**, set `EARSHOT_TLS_CLIENT_CERT` + `EARSHOT_TLS_CLIENT_KEY` (a box-level

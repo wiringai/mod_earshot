@@ -24,6 +24,15 @@
 #define SWITCH_RESAMPLE_QUALITY 2
 #define SWITCH_RECOMMENDED_BUFFER_SIZE 8192
 
+#define SWITCH_STATUS_SUCCESS 0
+#define SWITCH_CHANNEL_LOG 0
+#define SWITCH_LOG_WARNING 4
+/* log lines are counted, not printed, so a test can tell that one was written */
+extern int stub_log_lines;
+void switch_log_printf(int channel, int level, const char *fmt, ...);
+/* the last agent rate a resampler was built for, and how many were built */
+extern int stub_resample_creates, stub_resample_from;
+
 typedef int switch_bool_t;
 typedef unsigned long switch_size_t;
 typedef struct switch_audio_resampler { int from_rate, to_rate; int16_t *to; unsigned to_len; } switch_audio_resampler_t;

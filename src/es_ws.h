@@ -19,16 +19,21 @@ typedef struct es_ws es_ws_t;
 /* Callbacks run on the service thread; keep them fast and non-blocking. */
 typedef void (*es_ws_on_text_fn)(void *user, const char *data, size_t len);
 typedef void (*es_ws_on_binary_fn)(void *user, const void *data, size_t len);
-/* connected=1 on open; connected=0 on close/error (code+reason may be set). */
+/* connected=1 on open; connected=0 on close/error (code+reason may be set).
+ * What the owner sends from inside the connected=1 call is the first thing the new
+ * connection carries (the place for a protocol preamble). On a reconnect, anything that
+ * was still queued for the lost connection is dropped, not replayed. */
 typedef void (*es_ws_on_event_fn)(void *user, int connected, int code, const char *reason);
 
 typedef struct {
-    const char        *url;          /* ws:// or wss:// */
+    const char        *url;          /* ws:// or wss://, at most ES_URL_MAX bytes (es_util.h) */
     const char        *auth;         /* Authorization header value, or NULL */
     int                reconnect;    /* 1 = auto-reconnect with backoff + jitter */
     int                max_queue_bytes; /* cap on the outbound backlog (0 = default);
-                                        * drop-oldest past this so a long outage can't
-                                        * grow without bound / replay stale audio */
+                                        * drop-oldest past this so a slow agent can't make
+                                        * it grow without bound. Nothing queued for one
+                                        * connection is ever sent on the next: see the
+                                        * on_event note below. */
 
     void              *user;         /* opaque, passed back to callbacks */
     es_ws_on_text_fn   on_text;
@@ -62,7 +67,8 @@ typedef struct {
 typedef struct {
     int      connected;
     unsigned reconnects;    /* reconnect attempts after the first connect */
-    uint64_t queue_drops;   /* outbound frames dropped to stay under the queue cap */
+    uint64_t queue_drops;   /* outbound frames dropped: over the queue cap, or queued for a
+                             * connection that was lost before they could be sent */
     size_t   queued_bytes;  /* current outbound backlog */
     long     rtt_ms;        /* last ws ping/pong round-trip (ms), 0 if not yet measured */
 } es_ws_stats_t;
@@ -77,8 +83,9 @@ void     es_ws_stop(es_ws_t *ws);                   /* disconnect + detach from 
 void     es_ws_destroy(es_ws_t *ws);
 
 /* Tear down the shared service-thread pool. Call once at module unload, AFTER every
- * stream has been stopped — the pool's threads outlive individual streams, so they
- * must be joined before the module's code is unmapped. */
+ * stream has been stopped (mod_earshot's shutdown does that itself) — the pool's threads
+ * outlive individual streams, so they must be joined before the module's code is unmapped,
+ * and a stream still holding an es_ws_t would be left with a freed handle. */
 void     es_ws_global_shutdown(void);
 
 /* Create the shared service-thread pool up front (idempotent). Call at module load:
