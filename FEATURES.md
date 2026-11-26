@@ -220,8 +220,11 @@ start ... metrics=10          # emit earshot::metrics every 10s
 ## 10. Reliability  ✓
 
 - Auto-reconnect with **exponential backoff + jitter** (thundering-herd guard).
-- **Bounded outbound queue** (drop-oldest): buffers audio across a brief blip, but a long outage
-  drops rather than growing unbounded or replaying stale audio.
+- **Bounded outbound queue** (drop-oldest) so a slow agent cannot make it grow without bound.
+- **A reconnect starts clean**: caller audio is sent only while connected, whatever was queued
+  for a lost connection is dropped (counted in `ws_queue_drops`), and the protocol preamble is
+  always the first thing a new connection carries.
+- **Safe to unload**: `unload mod_earshot` stops every live stream first; calls stay up.
 - Single clean teardown path; no crash if the agent hangs up first.
 
 ```
@@ -272,6 +275,11 @@ played back while the forks did not; stopping one fork left the others running.
 - `wss://` (TLS) with server-cert verification against the system trust store; optional
   `auth=<token>` → `Authorization` header (use the `EARSHOT_AUTH` channel var for a value with a
   space, e.g. `Bearer <key>` — the option list is split on spaces).
+- **Credentials do not stay on the channel**: `EARSHOT_AUTH` and `EARSHOT_SESSION_CONFIG` are
+  removed once the stream has read them, so they never reach events, CDRs or `uuid_dump`;
+  URLs in events are shown without their query string.
+- **Agent input is bounded**: declared sample rates are checked against the rates speech
+  services use before any resampler is built.
 - **Box-level mTLS + custom CA** ✓ *(validated end-to-end on a real SIP call)* —
   `EARSHOT_TLS_CLIENT_CERT` + `EARSHOT_TLS_CLIENT_KEY` present a client certificate on every agent
   connection; `EARSHOT_TLS_CA` verifies the agent against a private CA — note it **replaces the system
@@ -324,7 +332,7 @@ start wss://agent.example/… ready=connect greeting=/opt/prompts/welcome.wav
 `start` · `stop` · `pause` · `resume` · `flush` · `send <text>` · `mask on|off` · `status` · `metrics`
 
 **Channel variables**: `EARSHOT_SESSION_CONFIG` (openai/deepgram/gemini/elevenlabs) · `EARSHOT_AUTH`
-· `EARSHOT_META` · `EARSHOT_GREETING` · `EARSHOT_NO_RECONNECT` · `EARSHOT_TLS_NO_HOSTNAME_CHECK`
+· `EARSHOT_KEEP_CREDENTIAL_VARS` · `EARSHOT_META` · `EARSHOT_GREETING` · `EARSHOT_NO_RECONNECT` · `EARSHOT_TLS_NO_HOSTNAME_CHECK`
 · (set by earshot) `earshot_ready` · `earshot_talking` · `earshot_masking`
 
 **Events**: `earshot::connected` · `earshot::ready` · `earshot::metrics` · `earshot::command` · `earshot::dtmf`

@@ -13,8 +13,10 @@ size_t switch_copy_string(char *d, const char *s, size_t n)
 { size_t i = 0; if (!n) return 0; for (; s && s[i] && i < n - 1; i++) d[i] = s[i]; d[i] = 0; return i; }
 void switch_uuid_get(switch_uuid_t *u) { if (u) memset(u, 0, sizeof *u); }
 void switch_uuid_format(char *b, switch_uuid_t *u) { (void) u; if (b) strcpy(b, "00000000-0000-0000-0000-000000000000"); }
+int stub_log_lines, stub_resample_creates, stub_resample_from;
+void switch_log_printf(int channel, int level, const char *fmt, ...) { (void) channel;(void) level;(void) fmt; stub_log_lines++; }
 int switch_resample_create(switch_audio_resampler_t **r, int a, int b, int c, int d, int e)
-{ (void) a;(void) b;(void) c;(void) d;(void) e; if (r) *r = 0; return 0; }
+{ (void) b;(void) c;(void) d;(void) e; stub_resample_creates++; stub_resample_from = a; if (r) *r = 0; return 0; }
 void switch_resample_destroy(switch_audio_resampler_t **r) { if (r) *r = 0; }
 int switch_resample_process(switch_audio_resampler_t *r, int16_t *x, int n) { (void) r;(void) x;(void) n; return 0; }
 switch_size_t switch_b64_encode(unsigned char *s, switch_size_t sl, unsigned char *d, switch_size_t dl)
