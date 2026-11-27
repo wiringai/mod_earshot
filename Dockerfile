@@ -9,7 +9,14 @@
 #
 # Then copy the artifacts out:
 #   id=$(docker create earshot-build); docker cp $id:/out ./out; docker rm $id
-FROM debian:12-slim AS build
+#
+# DEBIAN picks the release to build on (12 = bookworm, 13 = trixie):
+#   docker build --build-arg DEBIAN=13 --build-arg SW_TOKEN=pat_... -t earshot-build .
+# The module is built against whatever FreeSWITCH the SignalWire channel serves
+# for that release, and against that release's libwebsockets. /out/BUILD_INFO
+# records both, so a binary can always be traced to what it was built with.
+ARG DEBIAN=12
+FROM debian:${DEBIAN}-slim AS build
 ARG SW_TOKEN=""
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,7 +32,8 @@ RUN if [ -n "$SW_TOKEN" ]; then set -eux; \
         https://freeswitch.signalwire.com/repo/deb/debian-release/signalwire-freeswitch-repo.gpg \
         -o /usr/share/keyrings/signalwire.gpg; \
       echo "machine freeswitch.signalwire.com login signalwire password $SW_TOKEN" > /etc/apt/auth.conf; \
-      echo "deb [signed-by=/usr/share/keyrings/signalwire.gpg] https://freeswitch.signalwire.com/repo/deb/debian-release/ bookworm main" \
+      . /etc/os-release; \
+      echo "deb [signed-by=/usr/share/keyrings/signalwire.gpg] https://freeswitch.signalwire.com/repo/deb/debian-release/ $VERSION_CODENAME main" \
         > /etc/apt/sources.list.d/freeswitch.list; \
       apt-get update && apt-get install -y --no-install-recommends libfreeswitch-dev; \
       rm -rf /var/lib/apt/lists/*; \
@@ -39,6 +47,12 @@ RUN set -eux; \
     cmake --build build --parallel; \
     ctest --test-dir build --output-on-failure; \
     mkdir -p /out; \
+    . /etc/os-release; \
+    { echo "debian=$VERSION_ID ($VERSION_CODENAME)"; \
+      echo "freeswitch=$(dpkg-query -W -f='${Version}' libfreeswitch-dev 2>/dev/null || echo none)"; \
+      echo "libwebsockets=$(dpkg-query -W -f='${Version}' libwebsockets-dev)"; \
+      echo "gcc=$(gcc -dumpfullversion)"; } > /out/BUILD_INFO; \
+    cat /out/BUILD_INFO; \
     if [ -f build/mod_earshot.so ]; then \
       cp build/mod_earshot.so /out/; \
       (cd build && cpack -G DEB && cp mod-earshot_*.deb /out/) || true; \
@@ -48,5 +62,5 @@ RUN set -eux; \
 # (not scratch) so `docker create` has a command to instantiate — a scratch image has none
 # ("Error response from daemon: no command specified"). The base layer is already cached
 # from the build stage, so this adds no pull.
-FROM debian:12-slim AS artifacts
+FROM debian:${DEBIAN}-slim AS artifacts
 COPY --from=build /out /out

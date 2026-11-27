@@ -24,8 +24,15 @@ jobs:
 
   # The module itself needs FreeSWITCH dev headers (SignalWire apt repo, token-gated).
   # Runs only when the SW_TOKEN secret is present; produces the .so and a .deb.
+  #
+  # One build per Debian release, because that is what actually differs: each release
+  # has its own libwebsockets and OpenSSL, and the SignalWire channel serves its own
+  # FreeSWITCH packages for it. The FreeSWITCH version is whatever that channel carries
+  # on the day (1.11.x on both today; it no longer carries 1.10 for either), so the job
+  # does not claim one: each build writes what it was built against to BUILD_INFO, which
+  # is printed in the job summary and shipped inside the artifact.
   module:
-    name: build module + .deb (FS ${{ matrix.fs }})
+    name: build module + .deb (Debian ${{ matrix.debian }})
     runs-on: ubuntu-latest
     needs: unit
     # Compile mod_earshot.c on pushes AND on same-repo PRs (which have the secret) so a build
@@ -35,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        fs: [ "1.10", "1.11" ]
+        debian: [ "12", "13" ]
     steps:
       - uses: actions/checkout@v4
       - name: Build in Docker (installs libfreeswitch-dev when SW_TOKEN is set)
@@ -46,12 +53,16 @@ jobs:
             echo "::notice::SW_TOKEN secret not set — skipping module/.deb build (unit tests already passed)."
             exit 0
           fi
-          docker build --build-arg SW_TOKEN="$SW_TOKEN" -t earshot-build .
+          docker build --build-arg DEBIAN="${{ matrix.debian }}" --build-arg SW_TOKEN="$SW_TOKEN" -t earshot-build .
           id=$(docker create earshot-build); docker cp "$id:/out" ./out; docker rm "$id"
           ls -la out
+          { echo "### Built on Debian ${{ matrix.debian }}"; echo '```'; cat out/BUILD_INFO; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # The module must exist when the headers were installed: without this, a build
+          # that silently skipped the module target would still pass.
+          test -f out/mod_earshot.so || { echo "::error::no mod_earshot.so was built"; exit 1; }
       - name: Upload artifacts
         if: ${{ hashFiles('out/**') != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: mod_earshot-fs${{ matrix.fs }}
+          name: mod_earshot-debian${{ matrix.debian }}
           path: out/*
