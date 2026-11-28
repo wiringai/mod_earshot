@@ -84,7 +84,9 @@ Off by default; unknown/disabled → `{"ok":false,"error":…}`.
 
 | Event | Key headers | Fires when |
 |---|---|---|
-| `earshot::connected` | `url` | WS handshake completes |
+| `earshot::connected` | `url` | the agent's WebSocket handshake completes for the first time |
+| `earshot::reconnected` | `url` | a later connection completes, after the first was lost |
+| `earshot::error` | `reason` | a connection attempt failed (`connect timeout`, the library's reason), or `gave_up` once reconnecting stops (`reconnect_max=` / `reconnect_deadline=`; also sets `earshot_failed=true`) |
 | `earshot::ready` | `corr` | playback gate opens (also sets `earshot_ready=true`) |
 | `earshot::speech_started` / `earshot::speech_stopped` | `corr` | VAD turn boundaries (sets `earshot_talking`) |
 | `earshot::dtmf` | `digit` or `masked` | caller DTMF (`masked=true`, digit redacted, during a mask window) |
@@ -179,6 +181,8 @@ stream.
 | `EARSHOT_CONNECT_TIMEOUT` | seconds one connection attempt may take before it is abandoned (default 20, range 1 to 120); the `connect_timeout=` start option wins |
 | `EARSHOT_LIVENESS` | seconds a connected agent may send nothing, not even a pong, before it is dropped (default 20, minimum 2; `off` disables); the `liveness=` start option wins |
 | `EARSHOT_PING` | seconds between WebSocket pings (default 5, minimum 1, at most half of the liveness window); the `ping=` start option wins |
+| `EARSHOT_RECONNECT_MAX` | failed attempts in a row after which the stream stops reconnecting (default: no limit); the `reconnect_max=` start option wins |
+| `EARSHOT_RECONNECT_DEADLINE` | seconds the stream may stay down before it stops reconnecting (default: no limit); the `reconnect_deadline=` start option wins |
 | `EARSHOT_TLS_NO_HOSTNAME_CHECK` | skip wss cert/hostname checks (dev only) |
 | `earshot_ready` / `earshot_talking` / `earshot_masking` | **set by** Earshot for dialplan logic |
 

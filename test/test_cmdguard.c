@@ -35,7 +35,7 @@ int main(void)
     assert(!es_cmd_recpath_ok("../../etc/cron.d/pwn"));
     assert(!es_cmd_recpath_ok("/var/rec/../../root/.ssh/authorized_keys"));
     assert(!es_cmd_recpath_ok("/var/rec/a.wav bleg"));          /* no positional smuggling         */
-    assert( es_cmd_recpath_ok("/var/rec/call-123.wav"));        /* NOTE: absolute paths still allowed — not base-confined (see SECURITY.md) */
+    assert( es_cmd_recpath_ok("/var/rec/call-123.wav"));        /* shape only: es_cmd_record_ok confines absolute paths to record_dir= */
 
     /* leg: only the three real values (blocks positional-arg smuggling). */
     assert( es_cmd_leg_ok(""));
@@ -91,5 +91,50 @@ int main(void)
     assert(!es_cmd_text_ok("premium\nuuid_kill x"));
 
     printf("cmdguard: all assertions passed\n");
+        /* ---- allowlists (operator-configured) ---- */
+    assert( es_cmd_dialplan_allowed(NULL, ""));
+    assert( es_cmd_dialplan_allowed(NULL, "XML"));
+    assert( es_cmd_dialplan_allowed("", "xml"));
+    assert(!es_cmd_dialplan_allowed(NULL, "LUA"));
+    assert(!es_cmd_dialplan_allowed(NULL, "LUA:evil.lua"));
+    assert( es_cmd_dialplan_allowed("LUA, enum", "lua"));          /* named by the operator */
+    assert( es_cmd_dialplan_allowed("LUA,enum", "enum"));
+    assert(!es_cmd_dialplan_allowed("LUA", "LUAX"));                /* whole name, not a prefix */
+    assert(!es_cmd_dialplan_allowed("inline", "inline"));           /* never, even when named */
+    assert(!es_cmd_dialplan_allowed("LUA", "LUA x"));
+
+    assert( es_cmd_media_ok(NULL, "/var/media/hello.wav"));
+    assert( es_cmd_media_ok(NULL, "ivr/8000/welcome.wav"));
+    assert( es_cmd_media_ok(NULL, "tone_stream://%(200,0,440)"));   /* harmless by itself */
+    assert( es_cmd_media_ok(NULL, "silence_stream://500"));
+    assert( es_cmd_media_ok(NULL, "local_stream://moh"));
+    assert(!es_cmd_media_ok(NULL, "http://host/announce.wav"));     /* a fetch the agent chooses */
+    assert(!es_cmd_media_ok(NULL, "https://host/a.wav"));
+    assert(!es_cmd_media_ok(NULL, "shout://host/a.mp3"));
+    assert(!es_cmd_media_ok(NULL, "vlc://host/a"));
+    assert(!es_cmd_media_ok(NULL, "://x"));
+    assert( es_cmd_media_ok("https, http_cache", "https://host/a.wav"));
+    assert( es_cmd_media_ok("https,http_cache", "HTTP_CACHE://host/a.wav"));
+    assert(!es_cmd_media_ok("https", "http://host/a.wav"));         /* http is not https */
+    assert(!es_cmd_media_ok("https", "system::x"));
+    assert(!es_cmd_media_ok("https", ""));
+
+    assert( es_cmd_record_ok(NULL, NULL, "call-123.wav"));          /* relative: FreeSWITCH's recordings dir */
+    assert( es_cmd_record_ok(NULL, NULL, "2026/11/call.wav"));
+    assert(!es_cmd_record_ok(NULL, NULL, "/var/rec/call.wav"));     /* absolute needs record_dir= */
+    assert(!es_cmd_record_ok("", NULL, "/var/rec/call.wav"));
+    assert( es_cmd_record_ok("/var/rec", NULL, "/var/rec/call.wav"));
+    assert( es_cmd_record_ok("/var/rec/", NULL, "/var/rec/a/b.wav"));
+    assert( es_cmd_record_ok("/srv/a, /var/rec", NULL, "/var/rec/call.wav"));
+    assert(!es_cmd_record_ok("/var/rec", NULL, "/var/recordings/x.wav"));   /* a prefix is not the directory */
+    assert(!es_cmd_record_ok("/var/rec", NULL, "/var/rec"));
+    assert(!es_cmd_record_ok("/var/rec", NULL, "/var/rec/../../etc/x"));
+    assert(!es_cmd_record_ok("/var/rec", NULL, "/etc/freeswitch/vars.xml"));
+    assert(!es_cmd_record_ok("var/rec", NULL, "/var/rec/x.wav"));   /* a named directory must be absolute */
+    assert(!es_cmd_record_ok("/var/rec", NULL, "shout://host/steal"));
+    assert(!es_cmd_record_ok("/var/rec", NULL, "tone_stream://x"));  /* nothing is harmless to record to */
+    assert( es_cmd_record_ok(NULL, "shout", "shout://host/live"));
+    assert(!es_cmd_record_ok(NULL, "shout", "http://host/x"));
+
     return 0;
 }

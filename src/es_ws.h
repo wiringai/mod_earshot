@@ -19,7 +19,8 @@ typedef struct es_ws es_ws_t;
 /* Callbacks run on the service thread; keep them fast and non-blocking. */
 typedef void (*es_ws_on_text_fn)(void *user, const char *data, size_t len);
 typedef void (*es_ws_on_binary_fn)(void *user, const void *data, size_t len);
-/* connected=1 on open; connected=0 on close/error (code+reason may be set).
+/* connected=1 on open; connected=0 on close/error (code+reason may be set): code 0 is a
+ * close, -1 a failed attempt, ES_WS_GAVE_UP the end of reconnecting.
  * What the owner sends from inside the connected=1 call is the first thing the new
  * connection carries (the place for a protocol preamble). On a reconnect, anything that
  * was still queued for the lost connection is dropped, not replayed. */
@@ -77,7 +78,18 @@ typedef struct {
     int                connect_timeout_ms;
     int                liveness_ms;
     int                ping_ms;
+    /* When to stop reconnecting (both 0 = never stop, as before). Counted from the moment
+     * the connection was lost, or from the start if it never came up; a connection that
+     * establishes resets both.
+     *   reconnect_max          give up after this many failed attempts in a row
+     *   reconnect_deadline_ms  give up once the stream has been down this long
+     * Giving up is reported once through on_event with connected=0 and code
+     * ES_WS_GAVE_UP; the stream then stays down until it is stopped. */
+    int                reconnect_max;
+    int                reconnect_deadline_ms;
 } es_ws_opts_t;
+
+#define ES_WS_GAVE_UP (-2)   /* on_event code: reconnecting was abandoned (see reconnect_max) */
 
 #define ES_WS_CONNECT_TIMEOUT_DEFAULT_MS 20000
 #define ES_WS_CONNECT_TIMEOUT_MIN_MS      1000

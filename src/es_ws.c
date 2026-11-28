@@ -95,6 +95,8 @@ struct es_ws {
     int                     want_ping;
     long                    connect_started_ms;   /* when the attempt in progress began (0 if none) */
     int                     connect_timed_out;    /* the attempt was abandoned by us (service thread) */
+    long                    down_since_ms;        /* when the stream last went (or started) down; 0 while up */
+    int                     failed_attempts;      /* attempts in a row that did not establish */
     int                     connect_timeout_ms;   /* resolved from the options at create */
     int                     liveness_ms;          /* 0 = check off */
     int                     ping_ms;
@@ -299,6 +301,7 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
     case LWS_CALLBACK_CLIENT_ESTABLISHED:
         if (!w) break;
         w->connect_started_ms = 0;             /* the attempt is over: it succeeded */
+        w->down_since_ms = 0; w->failed_attempts = 0;
         w->connected_since_ms = es_now_ms();   /* backoff resets only once this proves stable */
         w->last_rx_ms = w->connected_since_ms; /* liveness clock starts now */
         w->last_ping_ms = 0;
@@ -438,6 +441,8 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
             es_queue_discard(w, es_queue_take(w, &tail, &bytes));
         }
         w->connect_started_ms = 0;
+        if (reason == LWS_CALLBACK_CLIENT_CONNECTION_ERROR) w->failed_attempts++;
+        if (!w->down_since_ms) w->down_since_ms = es_now_ms();
         if (!w->suppress_events && w->o.on_event) {
             int code = (reason == LWS_CALLBACK_CLIENT_CONNECTION_ERROR) ? -1 : 0;
             if (w->connect_timed_out) { code = -1; in = (void *) "connect timeout"; }
@@ -456,6 +461,7 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
             w->connected = 0; w->wsi = NULL; w->connect_started_ms = 0;
             if (w->connect_timed_out) {          /* nothing else told the owner */
                 w->connect_timed_out = 0;
+                w->failed_attempts++;
                 if (!w->suppress_events && w->o.on_event)
                     w->o.on_event(w->o.user, 0, -1, "connect timeout");
             }
@@ -518,12 +524,14 @@ static void es_connect(es_ws_t *w)
             i.ssl_connection |= LCCSCF_ALLOW_SELFSIGNED | LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK;
     }
     w->connect_started_ms = es_now_ms();   /* housekeeping abandons the attempt past connect_timeout_ms */
+    if (!w->down_since_ms) w->down_since_ms = w->connect_started_ms;
     if (!lws_client_connect_via_info(&i)) {
         /* Be authoritative: on some immediate-failure paths lws returns NULL without
          * firing CONNECTION_ERROR and without nulling *pwsi. Clear it ourselves so the
          * reconnect guard (!w->wsi) can fire — otherwise the stream never retries. */
         w->wsi = NULL;
         w->connect_started_ms = 0;
+        w->failed_attempts++;
         if (w->o.on_event && !w->suppress_events)
             w->o.on_event(w->o.user, 0, -1, "connect failed");
     }
@@ -645,6 +653,17 @@ static void *es_pool_service(void *arg)
                 w->connect_started_ms = 0;
                 w->connect_timed_out = 1;   /* es_cb reports it once, whichever callback ends the wsi */
                 lws_set_timeout(w->wsi, PENDING_TIMEOUT_USER_REASON_BASE, LWS_TO_KILL_ASYNC);
+            } else if (!w->connected && !w->wsi && w->o.reconnect
+                       && ((w->o.reconnect_max > 0 && w->failed_attempts >= w->o.reconnect_max)
+                           || (w->o.reconnect_deadline_ms > 0 && w->down_since_ms
+                               && now - w->down_since_ms >= w->o.reconnect_deadline_ms))) {
+                /* Enough: stop trying and say so once, so the owner can do something else
+                 * with the call (a fallback, a transfer to a person). */
+                w->o.reconnect = 0;
+                pthread_mutex_unlock(&p->mu);   /* no callbacks under p->mu */
+                if (w->o.on_event && !w->suppress_events)
+                    w->o.on_event(w->o.user, 0, ES_WS_GAVE_UP, "gave up");
+                pthread_mutex_lock(&p->mu);
             } else if (!w->connected && !w->wsi && w->o.reconnect && now >= w->next_reconnect_ms) {
                 int jitter = (int) ((w->rng = w->rng * 1103515245u + 12345u) % (unsigned) (w->backoff_ms / 2 + 1));
                 w->kill = 0;   /* a liveness drop set this; clear it so the new wsi survives */

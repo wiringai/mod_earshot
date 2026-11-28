@@ -139,17 +139,18 @@ call without touching the media path, the agent, or the WebSocket. Nothing extra
 Node (`modesl`), Python (`greenswitch`), Go — receives them the instant they fire. Every event is tagged
 with the channel `Unique-ID` and the correlation id, so you can act on one specific call.
 
-Earshot fires **nine typed events** (subclass `earshot::…`):
+Earshot fires **ten typed events** (subclass `earshot::…`):
 
 | Event | Fires when | Key headers |
 |---|---|---|
 | `earshot::connected` | WebSocket handshake to the agent completes | `url` |
+| `earshot::reconnected` | the agent came back after the connection was lost | `url` |
 | `earshot::ready` | playback gate opens — the caller won't answer into silence | `corr` |
 | `earshot::speech_started` / `…stopped` | module-side VAD marks a caller turn boundary | `corr` |
 | `earshot::dtmf` | caller pressed a digit (redacted inside a PCI mask window) | `digit` \| `masked` |
 | `earshot::command` | the agent ran a whitelisted call-control action (audit trail) | `action`, `api`, `ok`, `result` |
 | `earshot::metrics` | periodic / on-close / on-demand | latency KPIs + counters |
-| `earshot::disconnected` / `…error` | the agent socket closed / failed | `reason` |
+| `earshot::disconnected` / `…error` | the agent socket closed / failed; `reason=gave_up` once reconnecting stops | `reason` |
 
 Subscribe from `fs_cli` (any ESL client uses the same wire command):
 

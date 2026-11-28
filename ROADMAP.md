@@ -95,7 +95,7 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
   record / setvar / hold / bridge / park), fires an `earshot::command` audit event, and echoes a
   `command_result`. Turns LLM tool calls into real telephony actions. **VALIDATED**: `setvar` executed
   mid-call (`uuid_getvar` confirmed the side effect) + `ok:true` echoed + event fired; refused with
-  `error:disabled` when the gate is off. ☐ next: per-action scoping (`commands=transfer,hangup`).
+  `error:disabled` when the gate is off. ☑ per-action scoping (`commands=transfer,hangup`).
 - ☑ **Correlation-first handshake**: `X-Call-ID`/`X-Channel-UUID`/`X-Correlation-ID` headers on the
   WS handshake, and (Twilio) `earshot_call_id`+`earshot_channel_uuid` in `start.customParameters`.
 - ☑ **Caller context + welcome greeting**: `EARSHOT_META` → `X-Earshot-Meta` handshake header (opaque

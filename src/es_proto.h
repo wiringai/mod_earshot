@@ -107,6 +107,12 @@ void            es_proto_set_ws(es_proto_ctx_t *p, es_ws_t *ws);
 /* Borrowed allowlist (must outlive the ctx) of variable names the `setvar` command may set;
  * NULL or empty means no variable is settable (fail closed). */
 void            es_proto_set_setvar_allow(es_proto_ctx_t *p, const char *csv);
+/* Borrowed operator allowlists (must outlive the ctx; NULL = none) for the arguments an agent
+ * supplies on the control channel: extra transfer dialplans (`dialplans=`), directories an
+ * absolute record path may lie under (`record_dir=`), and stream schemes play and record may
+ * use beyond the harmless built-ins (`media_schemes=`). See es_cmdguard.h. */
+void            es_proto_set_cmd_policy(es_proto_ctx_t *p, const char *dialplans_csv,
+                                        const char *record_dirs_csv, const char *media_schemes_csv);
 
 /* Lifecycle preamble/postamble (Twilio connected+start / stop; no-op for native). */
 void es_proto_send_start(es_proto_ctx_t *p, es_ws_t *ws);

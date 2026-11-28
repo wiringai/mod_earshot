@@ -27,6 +27,9 @@ struct es_proto_ctx {
     char            channel_uuid[64];
     char           *cfg;        /* verbatim session-config JSON (openai/deepgram), or NULL */
     const char     *setvar_allow; /* commands setvar: operator allowlist of settable var names (setvars=); NULL=none */
+    const char     *dialplan_allow;  /* dialplans=: transfer dialplans beyond XML; NULL=none */
+    const char     *record_dirs;     /* record_dir=: directories an absolute record path may lie under; NULL=none */
+    const char     *media_schemes;   /* media_schemes=: stream schemes play/record may use; NULL=built-ins only */
     uint64_t        out_seq;    /* Twilio sequenceNumber */
     uint64_t        out_chunk;  /* Twilio media chunk */
     uint64_t        out_ts;     /* cumulative media timestamp (ms) */
@@ -172,6 +175,12 @@ void es_proto_set_ws(es_proto_ctx_t *p, es_ws_t *ws) { if (p) p->ws = ws; }
 /* Operator allowlist of channel-variable names the agent may set via the `setvar` command.
  * The pointer is borrowed (must outlive the ctx); NULL/empty means no variable is settable. */
 void es_proto_set_setvar_allow(es_proto_ctx_t *p, const char *csv) { if (p) p->setvar_allow = csv; }
+void es_proto_set_cmd_policy(es_proto_ctx_t *p, const char *dialplans_csv,
+                             const char *record_dirs_csv, const char *media_schemes_csv)
+{
+    if (!p) return;
+    p->dialplan_allow = dialplans_csv; p->record_dirs = record_dirs_csv; p->media_schemes = media_schemes_csv;
+}
 
 void es_proto_destroy(es_proto_ctx_t *p)
 {
@@ -503,7 +512,8 @@ static void es_dispatch_command(es_proto_ctx_t *p, cJSON *root, const es_proto_s
         const char *cx = es_json_str(root, "context");
         int n;
         if (!es_cmd_token_ok(to))        ES_CMD_BLOCK("rejected: transfer destination");
-        if (!es_cmd_dialplan_ok(dp))     ES_CMD_BLOCK("rejected: transfer dialplan"); /* blocks the `inline` app-exec */
+        if (!es_cmd_dialplan_allowed(p->dialplan_allow, dp))
+            ES_CMD_BLOCK("rejected: transfer dialplan (only XML, or one named in dialplans=)");
         if (*cx && !es_cmd_token_ok(cx)) ES_CMD_BLOCK("rejected: transfer context");
         n = snprintf(arg, sizeof arg, "%s %s", uuid, to);
         if (n < 0 || n >= (int) sizeof arg) n = (int) sizeof arg - 1;   /* clamp against oversized fields */
@@ -525,6 +535,8 @@ static void es_dispatch_command(es_proto_ctx_t *p, cJSON *root, const es_proto_s
         const char *file = es_json_str(root, "file");
         const char *leg  = es_json_str(root, "leg");
         if (!es_cmd_token_ok(file)) ES_CMD_BLOCK("rejected: play file (app-exec/empty)");
+        if (!es_cmd_media_ok(p->media_schemes, file))
+            ES_CMD_BLOCK("rejected: play file (stream scheme not in media_schemes=)");
         if (!es_cmd_leg_ok(leg))    ES_CMD_BLOCK("rejected: play leg");
         snprintf(api, sizeof api, "uuid_broadcast");
         snprintf(arg, sizeof arg, "%s %s %s", uuid, file, *leg ? leg : "aleg");
@@ -537,6 +549,8 @@ static void es_dispatch_command(es_proto_ctx_t *p, cJSON *root, const es_proto_s
         if (*state && strcasecmp(state, "start") && strcasecmp(state, "stop") &&
             strcasecmp(state, "mask") && strcasecmp(state, "unmask")) ES_CMD_BLOCK("rejected: record state");
         if (!es_cmd_recpath_ok(file)) ES_CMD_BLOCK("rejected: record path (app-exec/traversal)");
+        if (!es_cmd_record_ok(p->record_dirs, p->media_schemes, file))
+            ES_CMD_BLOCK("rejected: record path (absolute path outside record_dir=, or a stream scheme not in media_schemes=)");
         snprintf(api, sizeof api, "uuid_record");
         snprintf(arg, sizeof arg, "%s %s %s", uuid, *state ? state : "start", file);
     } else if (!strcasecmp(action, "setvar")) {

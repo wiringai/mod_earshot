@@ -17,6 +17,33 @@ All notable changes to Earshot (`mod_earshot`). Format follows
   the second. A stream can now wait longer for it, or give up sooner.
 - A connection attempt that is abandoned reports `connect timeout` as its reason, once.
 
+- **A stream can stop reconnecting.** `reconnect_max=<attempts>` and
+  `reconnect_deadline=<seconds>` (or `EARSHOT_RECONNECT_MAX` / `EARSHOT_RECONNECT_DEADLINE`)
+  end the retries after that many failed attempts in a row, or once the agent has been gone
+  that long. The stream then fires one `earshot::error` with `reason=gave_up` and sets
+  `earshot_failed=true` on the channel, so a dialplan can fall back to a person. With neither
+  set a stream keeps trying, as before.
+- `earshot::reconnected`, fired when a later connection completes.
+
+### Changed (check your dialplans)
+- **`earshot::connected` fires when the agent's handshake completes**, as documented. It used
+  to fire as soon as `start` returned, before any connection existed, so an unreachable agent
+  produced `connected` followed by errors. It now fires once, on the first connection; an
+  application that treated it as "stream started" should use the `+OK` reply to `start`.
+- **Agent commands: `transfer`, `play` and `record` arguments are allowlisted.** An agent
+  granted these actions could name any dialplan but `inline` (so `LUA:script.lua` ran a script
+  as the dialplan), play any URL (`http://`, `shout://`: a request from inside your network to
+  an address the agent chose) and record to any absolute path FreeSWITCH can write, or to a
+  stream that leaves the box. Now:
+  - `transfer` may name only the `XML` dialplan, unless `dialplans=<name,...>` lists another;
+  - `record` takes a relative path, or an absolute path under `record_dir=<dir,...>`. **With
+    no `record_dir=`, an absolute record path is refused**;
+  - `play` and `record` refuse stream schemes unless `media_schemes=<scheme,...>` lists them
+    (`tone_stream`, `silence_stream` and `local_stream` stay allowed for `play`).
+- **A command whose API failed reports `ok:false`.** FreeSWITCH's `uuid_*` APIs return
+  success and put `-ERR ...` in their output; the `command_result` sent to the agent and the
+  `earshot::command` audit said `ok:true`. Both now say `ok:false` with the reason in `error`.
+
 ### Fixed
 - **A stream that stops now closes its WebSocket properly.** Stopping used to cut the
   connection: the agent saw an abnormal close (1006) on every call end, and a message queued

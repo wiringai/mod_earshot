@@ -209,7 +209,7 @@ caller→agent audio froze completely (0 frames) while masked, then resumed.
   (stream start → agent's first audio), `response-ms` / `response-ms-max` (caller stops speaking →
   agent's first audio, per turn — uses the VAD) + `turns`, and `ws-rtt-ms` (a WebSocket ping/pong
   every 5 s). Validated live: first-audio ≈ 65 ms and RTT = 1 ms against a localhost agent.
-- **Lifecycle events**: `earshot::connected`, `earshot::ready`, `earshot::command`, `earshot::dtmf`,
+- **Lifecycle events**: `earshot::connected`, `earshot::reconnected`, `earshot::ready`, `earshot::command`, `earshot::dtmf`,
   `earshot::speech_started`, `earshot::speech_stopped` (all subclasses reserved, so ESL subscribers receive them).
 - **`earshot <uuid> status`** — quick liveness JSON.
 
@@ -231,6 +231,9 @@ start ... metrics=10          # emit earshot::metrics every 10s
 EARSHOT_NO_RECONNECT=true     # channel var to disable auto-reconnect (backpressure is automatic drop-oldest)
 connect_timeout=45            # start option (or EARSHOT_CONNECT_TIMEOUT): give a slow-starting agent 45 s per attempt (default 20)
 liveness=60 ping=10           # start options (or EARSHOT_LIVENESS / EARSHOT_PING): drop a silent agent after 60 s (default 20; liveness=off disables)
+reconnect_max=5               # start option (or EARSHOT_RECONNECT_MAX): stop after 5 failed attempts in a row
+reconnect_deadline=15         # start option (or EARSHOT_RECONNECT_DEADLINE): stop once the agent has been gone 15 s
+                              # either way: one earshot::error reason=gave_up, and earshot_failed=true for the dialplan
 ```
 
 ## 11. Correlation-first  ✓
@@ -337,7 +340,7 @@ start wss://agent.example/… ready=connect greeting=/opt/prompts/welcome.wav
 · `EARSHOT_KEEP_CREDENTIAL_VARS` · `EARSHOT_META` · `EARSHOT_GREETING` · `EARSHOT_NO_RECONNECT` · `EARSHOT_TLS_NO_HOSTNAME_CHECK`
 · (set by earshot) `earshot_ready` · `earshot_talking` · `earshot_masking`
 
-**Events**: `earshot::connected` · `earshot::ready` · `earshot::metrics` · `earshot::command` · `earshot::dtmf`
+**Events**: `earshot::connected` · `earshot::reconnected` · `earshot::ready` · `earshot::metrics` · `earshot::command` · `earshot::dtmf`
 · `earshot::speech_started` · `earshot::speech_stopped` · `earshot::transcript`
 
 See [ROADMAP.md](ROADMAP.md) for what's next.
