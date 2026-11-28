@@ -21,6 +21,7 @@
 #include "es_util.h"    /* URL limit + redaction, option-key split (pure C, unit-tested) */   /* protocol adapters: native / twilio / ... */
 
 #define EARSHOT_EVENT_CONNECTED    "earshot::connected"
+#define EARSHOT_EVENT_RECONNECTED  "earshot::reconnected"
 #define EARSHOT_EVENT_DISCONNECTED "earshot::disconnected"
 #define EARSHOT_EVENT_ERROR        "earshot::error"
 #define EARSHOT_EVENT_METRICS      "earshot::metrics"
@@ -65,9 +66,15 @@
     "\t\t[barge_min_ms=<n>] [barge_fade_ms=<n>]\n" \
     "\t\t[dtmf=on] [mask=on] [commands=true|<action,...>] [setvars=<name,...>] [metrics=<seconds>] [corr=auto|<id>]\n" \
     "\t\t[auth=<token> | EARSHOT_AUTH var] [greeting=<file> | EARSHOT_GREETING var]  (caller context: EARSHOT_META header)\n" \
+    "\t\t[connect_timeout=<seconds>] [liveness=<seconds>|off] [ping=<seconds>]  (defaults 20, 20, 5)\n" \
+    "\t\t[reconnect_max=<attempts>] [reconnect_deadline=<seconds>]  (default: keep trying; on giving up: earshot_failed=true)\n" \
+    "\t\t[dialplans=<name,...>] [record_dir=<dir,...>] [media_schemes=<scheme,...>]  (what agent commands may name)\n" \
     "\t  control channel: agent sends {\"type\":\"command\",\"action\":...}; commands=true grants all actions,\n" \
     "\t  commands=play,hangup grants only those. Arguments are validated (app-exec/path/exec-var rejected).\n" \
     "\t  setvar is fail-closed: only variable names listed in setvars=<name,...> may be set.\n" \
+    "\t  transfer may name only the XML dialplan unless dialplans=<name,...> lists another;\n" \
+    "\t  record takes a relative path, or an absolute one under record_dir=<dir,...>;\n" \
+    "\t  play/record refuse http://, shout:// and other streams unless media_schemes=<scheme,...> lists the scheme.\n" \
     "\t  actions: transfer|hangup|send_dtmf|play|stop_play|record|setvar|hold|bridge|park\n" \
     "<uuid> stop\n" \
     "<uuid> pause | resume | flush\n" \
@@ -134,6 +141,9 @@ typedef struct es_stream {
     switch_bool_t    cmd_allow_all;  /* commands=true: every action allowed */
     char             cmd_allow[256]; /* commands=<csv>: only these actions allowed */
     char             setvar_allow[256]; /* setvars=<csv>: variable names the setvar action may set */
+    char             dialplan_allow[128];  /* dialplans=<csv>: transfer dialplans beyond XML */
+    char             record_dirs[512];     /* record_dir=<csv>: directories an absolute record path may lie under */
+    char             media_schemes[128];   /* media_schemes=<csv>: stream schemes play/record may use */
     switch_bool_t    dtmf_on;       /* capture caller DTMF -> events + agent */
     switch_bool_t    masking;       /* PCI window: mute caller audio + suppress DTMF to the agent (ES_LOAD/STORE) */
     switch_bool_t    paused;        /* `pause`: caller audio not sent, agent audio held (ES_LOAD/STORE) */
@@ -168,7 +178,12 @@ typedef struct es_stream {
     es_proto_sink_t  sink;          /* inbound-message sink -> play_buf/flush/marks */
     switch_buffer_t *play_buf;      /* agent audio (decoded L16) awaiting playback */
     switch_mutex_t  *play_mutex;    /* guards play_buf: es_ws thread writes, media thread reads */
-    switch_mutex_t  *cmd_ws_mutex;  /* serializes a command worker's echo (es_ws_send_text) against CLOSE's es_ws_destroy */
+    switch_mutex_t  *cmd_ws_mutex;  /* the stream's life lock: CLOSE holds it while it tears down ws, proto_ctx,
+                                     * vad and play_buf; everything that can run beside CLOSE and touches one
+                                     * of them (API verbs, the DTMF hook, a command worker's echo) takes it and
+                                     * checks `closed` first. Order: cmd_ws_mutex, then play_mutex. */
+    switch_bool_t    closed;        /* teardown has begun; nothing below may be used [cmd_ws_mutex] */
+    switch_bool_t    stopping;      /* a `stop` is removing the media bug [cmd_ws_mutex] */
     struct es_mark  *marks_head, *marks_tail;  /* pending Twilio marks, guarded by play_mutex */
     int              marks_n;                  /* pending marks (play_mutex) */
     uint64_t         play_in, play_out;        /* bytes queued to / consumed from play_buf (play_mutex) */
@@ -178,6 +193,14 @@ typedef struct es_stream {
 
     /* welcome greeting: a file preloaded at channel rate, dropped into the playout the moment
      * the ready-gate opens so it leads the agent's first words (see the ready-announce block) */
+    /* transport timers, in milliseconds as es_ws_opts_t takes them (0 = default, <0 = off) */
+    int              connect_timeout_ms;    /* connect_timeout= / EARSHOT_CONNECT_TIMEOUT */
+    int              liveness_ms;           /* liveness=       / EARSHOT_LIVENESS */
+    int              ping_ms;               /* ping=           / EARSHOT_PING */
+    int              reconnect_max;         /* reconnect_max=      / EARSHOT_RECONNECT_MAX (attempts, 0 = no limit) */
+    int              reconnect_deadline_ms; /* reconnect_deadline= / EARSHOT_RECONNECT_DEADLINE (seconds) */
+    unsigned         connects;              /* connections established so far (ws service thread) */
+
     char             greeting_path[256];    /* greeting audio file (greeting= / EARSHOT_GREETING) */
     int16_t         *greeting_pcm;          /* preloaded greeting, L16 mono @ chan_rate (pool-owned) */
     size_t           greeting_samples;      /* samples in greeting_pcm (0 = no greeting) */
@@ -324,6 +347,7 @@ static void es_fade_out(switch_buffer_t *buf, int fade_ms, int rate)
  * too, and an agent waiting on one must not wait forever. */
 static void es_play_discard_locked(es_stream_t *st, int fade)
 {
+    if (!st->play_buf) return;             /* read-only fork, or already torn down */
     if (fade) es_fade_out(st->play_buf, st->barge_fade_ms, st->chan_rate);
     else      switch_buffer_zero(st->play_buf);
     st->play_out = st->play_in - switch_buffer_inuse(st->play_buf);
@@ -333,11 +357,13 @@ static void es_play_discard_locked(es_stream_t *st, int fade)
 /* Interrupt the agent: fade or hard-cut the queued playback per barge_fade_ms. */
 static void es_barge_now(es_stream_t *st)
 {
-    if (!st->play_buf) return;
-    switch_mutex_lock(st->play_mutex);
+    int had;
+    if (!st->play_mutex) return;
+    switch_mutex_lock(st->play_mutex);     /* play_buf is looked at under the lock CLOSE destroys it under */
+    had = st->play_buf != NULL;
     es_play_discard_locked(st, st->barge_fade_ms > 0);
     switch_mutex_unlock(st->play_mutex);
-    st->barges++;
+    if (had) st->barges++;
 }
 
 /* Remove a stream from its channel's list (no-op if there is no list or it is not on it). */
@@ -383,6 +409,10 @@ static switch_status_t es_dtmf_hook(switch_core_session_t *session, const switch
     es_stream_t *st = (es_stream_t *) switch_channel_get_private(channel, EARSHOT_BUG_NAME);
     char d[2];
     if (!st || direction != SWITCH_DTMF_RECV) return SWITCH_STATUS_SUCCESS;
+    /* The hook runs on the session thread, CLOSE on whichever thread removed the media
+     * bug: hold the life lock so the stream cannot be torn down under this digit. */
+    switch_mutex_lock(st->cmd_ws_mutex);
+    if (st->closed) { switch_mutex_unlock(st->cmd_ws_mutex); return SWITCH_STATUS_SUCCESS; }
     st->dtmf_count++;
     if (ES_LOAD(st->masking)) {
         es_fire_event(session, EARSHOT_EVENT_DTMF, "masked", "true");   /* audit only, digit redacted */
@@ -395,6 +425,7 @@ static switch_status_t es_dtmf_hook(switch_core_session_t *session, const switch
      * and not while paused (the held agent audio must survive the pause) */
     if (!ES_LOAD(st->masking) && !ES_LOAD(st->paused) && (st->barge == ES_BARGE_DTMF || st->barge == ES_BARGE_ANY))
         es_barge_now(st);
+    switch_mutex_unlock(st->cmd_ws_mutex);
     return SWITCH_STATUS_SUCCESS;
 }
 
@@ -407,6 +438,23 @@ static const char *es_privkey(switch_core_session_t *session, const char *id)
 }
 
 /* Parse one key=value option into the stream config. Returns SWITCH_TRUE if consumed. */
+/* A timer option in seconds ("30", "2.5") as the milliseconds es_ws_opts_t takes; "off",
+ * "false", "no" or "0" switch the timer off (-1) where it can be (liveness only: the
+ * transport falls back to its default for the others); anything unreadable keeps the
+ * default (0). Capped so the multiplication cannot overflow. */
+static int es_timer_ms(const char *val)
+{
+    double secs;
+    char *end = NULL;
+    if (zstr(val)) return 0;
+    if (!strcasecmp(val, "off") || !strcasecmp(val, "false") || !strcasecmp(val, "no")) return -1;
+    secs = strtod(val, &end);
+    if (end == val || secs < 0) return 0;
+    if (secs == 0) return -1;
+    if (secs > 86400) secs = 86400;
+    return (int) (secs * 1000.0 + 0.5);
+}
+
 static switch_bool_t es_apply_option(es_stream_t *st, const char *kv)
 {
     char key[64];
@@ -471,6 +519,12 @@ static switch_bool_t es_apply_option(es_stream_t *st, const char *kv)
         }
     } else if (!strcasecmp(key, "setvars")) {
         switch_copy_string(st->setvar_allow, val, sizeof st->setvar_allow); /* setvar name allowlist */
+    } else if (!strcasecmp(key, "dialplans")) {
+        switch_copy_string(st->dialplan_allow, val, sizeof st->dialplan_allow);
+    } else if (!strcasecmp(key, "record_dir")) {
+        switch_copy_string(st->record_dirs, val, sizeof st->record_dirs);
+    } else if (!strcasecmp(key, "media_schemes")) {
+        switch_copy_string(st->media_schemes, val, sizeof st->media_schemes);
     } else if (!strcasecmp(key, "metrics")) {
         st->metrics_interval = atoi(val);       /* seconds between earshot::metrics events */
     } else if (!strcasecmp(key, "id")) {
@@ -479,6 +533,16 @@ static switch_bool_t es_apply_option(es_stream_t *st, const char *kv)
         switch_copy_string(st->corr, val, sizeof st->corr);
     } else if (!strcasecmp(key, "auth")) {
         switch_copy_string(st->auth, val, sizeof st->auth);
+    } else if (!strcasecmp(key, "connect_timeout")) {
+        st->connect_timeout_ms = es_timer_ms(val);
+    } else if (!strcasecmp(key, "liveness")) {
+        st->liveness_ms = es_timer_ms(val);
+    } else if (!strcasecmp(key, "ping")) {
+        st->ping_ms = es_timer_ms(val);
+    } else if (!strcasecmp(key, "reconnect_max")) {
+        st->reconnect_max = atoi(val) > 0 ? atoi(val) : 0;
+    } else if (!strcasecmp(key, "reconnect_deadline")) {
+        st->reconnect_deadline_ms = es_timer_ms(val) > 0 ? es_timer_ms(val) : 0;
     } else if (!strcasecmp(key, "greeting")) {
         switch_copy_string(st->greeting_path, val, sizeof st->greeting_path);  /* path w/o spaces; else EARSHOT_GREETING */
     } else {
@@ -782,22 +846,43 @@ static void es_cmd_echo(es_ws_t *ws, const char *id, const char *action, const c
  *    the read-lock alone does NOT make st->ws safe. If CLOSE already ran, st->ws is NULL -> skip.
  * A self-terminating command (hangup/transfer) tears its own call down, so by the time we relocate
  * the session is gone (or private cleared) and no command_result is echoed -- expected. */
+/* The reason from an API's "-ERR <reason>" output, made safe to put inside a JSON string
+ * (quotes, backslashes and control characters become spaces), or NULL when the API did not
+ * report an error. */
+static const char *es_api_error(const char *out, char *buf, size_t blen)
+{
+    size_t n = 0;
+    if (!out || strncmp(out, "-ERR", 4)) return NULL;
+    out += 4;
+    while (*out == ' ') out++;
+    for (; *out && *out != '\n' && *out != '\r' && n + 1 < blen; out++)
+        buf[n++] = (*out == '"' || *out == '\\' || (unsigned char) *out < 0x20) ? ' ' : *out;
+    while (n && buf[n - 1] == ' ') n--;
+    buf[n] = '\0';
+    return n ? buf : "failed";
+}
+
 static void es_cmd_run(es_cmd_job_t *j)
 {
     switch_stream_handle_t stream = { 0 };
     switch_core_session_t *sess;
     switch_status_t rc;
+    char errbuf[160];
+    const char *err;
     SWITCH_STANDARD_STREAM(stream);
     rc = switch_api_execute(j->api, j->arg, NULL, &stream);
     switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "earshot command: %s %s -> %s\n",
                       j->api, j->arg, stream.data ? (char *) stream.data : "");
-    es_cmd_audit(j->uuid, j->corr, j->action, j->api, NULL, rc, (char *) stream.data);
+    /* Most uuid_* APIs return success from switch_api_execute and put the failure in their
+     * output ("-ERR No such channel!"). The agent and the audit must see that as a failure. */
+    err = es_api_error((const char *) stream.data, errbuf, sizeof errbuf);
+    es_cmd_audit(j->uuid, j->corr, j->action, j->api, err, rc, (char *) stream.data);
     if ((sess = switch_core_session_locate(j->uuid))) {
         es_stream_t *st = (es_stream_t *) switch_channel_get_private(
                               switch_core_session_get_channel(sess), es_privkey(sess, j->stream_id));
         if (st) {
             switch_mutex_lock(st->cmd_ws_mutex);
-            if (st->ws) es_cmd_echo(st->ws, j->cmd_id, j->action, NULL, rc);
+            if (st->ws) es_cmd_echo(st->ws, j->cmd_id, j->action, err, rc);
             switch_mutex_unlock(st->cmd_ws_mutex);
         }
         switch_core_session_rwunlock(sess);
@@ -891,6 +976,22 @@ static void es_on_ws_event(void *user, int connected, int code, const char *reas
         if (st->compat_mas && st->compat_metadata[0])
             es_ws_send_text(st->ws, st->compat_metadata, strlen(st->compat_metadata));
         if (st->ready_mode == ES_READY_CONNECT) ES_STORE(st->ready, SWITCH_TRUE);
+        /* `connected` means what it says: the first time the handshake completes, not the
+         * moment the stream was started. Later connections are `reconnected`, so an
+         * application can tell "the agent is there" from "the agent came back". */
+        if (st->session) {
+            char shown[256];
+            if (st->connects++ == 0)
+                es_fire_event(st->session, EARSHOT_EVENT_CONNECTED, "url", es_url_for_display(st, shown, sizeof shown));
+            else
+                es_fire_event(st->session, EARSHOT_EVENT_RECONNECTED, "url", es_url_for_display(st, shown, sizeof shown));
+        }
+    } else if (st->session && code == ES_WS_GAVE_UP) {
+        /* Reconnecting was abandoned (reconnect_max= / reconnect_deadline=). One terminal
+         * error, and a channel variable the dialplan can branch on to fall back. */
+        switch_channel_set_variable(switch_core_session_get_channel(st->session), "earshot_failed", "true");
+        es_fire_event(st->session, EARSHOT_EVENT_ERROR, "reason", "gave_up");
+        if (st->compat_mas) es_fire_event(st->session, MAS_EVENT_ERROR, "reason", "gave_up");
     } else if (st->session) {
         /* code < 0 = connect/handshake failure, otherwise a normal close (incl. reconnect churn).
          * Safe to fire from the ws service thread: es_ws_stop mutes further callbacks and
@@ -931,11 +1032,16 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
         if (switch_core_media_bug_read(bug, &frame, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS && frame.datalen) {
             /* masking window (PCI): don't leak caller audio to the agent; `pause`: nothing
              * leaves the box until `resume` (mod_audio_stream semantics) */
-            if (st->ws && es_ws_connected(st->ws) && !ES_LOAD(st->masking) && !ES_LOAD(st->paused)) {
-                /* the proto adapter frames it (native binary / twilio media JSON) */
-                es_proto_send_audio(st->proto_ctx, st->ws, (const int16_t *) frame.data, frame.datalen / 2);
-                st->tx_frames++;
-                st->tx_bytes += frame.datalen;
+            if (st->ws && es_ws_connected(st->ws)) {
+                int sending = !ES_LOAD(st->masking) && !ES_LOAD(st->paused);
+                if (sending) {
+                    /* the proto adapter frames it (native binary / twilio media JSON) */
+                    es_proto_send_audio(st->proto_ctx, st->ws, (const int16_t *) frame.data, frame.datalen / 2);
+                    st->tx_frames++;
+                    st->tx_bytes += frame.datalen;
+                }
+                /* a vendor that drops a silent connection is kept alive through a pause or mask */
+                es_proto_tick(st->proto_ctx, st->ws, (long) (switch_micro_time_now() / 1000), sending);
             }
             /* module-side turn detection on the caller audio (independent of the agent) */
             if (st->vad) {
@@ -1052,11 +1158,15 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
             es_chan_unlink(switch_core_session_get_channel(s), st);
             es_fire_metrics(s, st);      /* final snapshot while ws stats are still available */
         }
+        /* From here to the end the life lock is held: an API verb, the DTMF hook or a
+         * command worker that got hold of st before the private was cleared either
+         * finished already or finds `closed` set and backs off. st itself is session
+         * memory and outlives all of them. */
+        switch_mutex_lock(st->cmd_ws_mutex);
+        st->closed = SWITCH_TRUE;
         if (st->ws) {
-            es_proto_send_stop(st->proto_ctx, st->ws);         /* best-effort postamble */
-            switch_mutex_lock(st->cmd_ws_mutex);               /* fence out any in-flight command-worker echo */
-            es_ws_destroy(st->ws); st->ws = NULL;              /* joins ws thread first */
-            switch_mutex_unlock(st->cmd_ws_mutex);
+            es_proto_send_stop(st->proto_ctx, st->ws);         /* closing message; the transport delivers it, then closes with 1000 */
+            es_ws_destroy(st->ws); st->ws = NULL;              /* returns once the service thread has let go */
         }
         if (st->proto_ctx) { es_proto_destroy(st->proto_ctx); st->proto_ctx = NULL; }
         if (st->vad) switch_vad_destroy(&st->vad);
@@ -1068,6 +1178,7 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
             if (st->play_buf) switch_buffer_destroy(&st->play_buf);
             switch_mutex_unlock(st->play_mutex);
         }
+        switch_mutex_unlock(st->cmd_ws_mutex);
         es_live_remove(st);   /* last: until here an unload must wait for this stream */
         break;
     }
@@ -1212,6 +1323,8 @@ static switch_status_t es_start_stream(switch_core_session_t *session, int argc,
                                         switch_core_session_get_uuid(session),
                                         switch_channel_get_variable(channel, "EARSHOT_SESSION_CONFIG"));
         es_proto_set_setvar_allow(st->proto_ctx, st->setvar_allow);  /* borrowed; st outlives the ctx */
+        es_proto_set_cmd_policy(st->proto_ctx, st->dialplan_allow, st->record_dirs, st->media_schemes);
+        es_proto_set_record_base(st->proto_ctx, SWITCH_GLOBAL_dirs.recordings_dir);
         es_scrub_credentials(channel);   /* both are copied now (st->auth above, the config just here) */
 
         /* module-side VAD runs on the channel-rate read stream */
@@ -1253,6 +1366,19 @@ static switch_status_t es_start_stream(switch_core_session_t *session, int argc,
         o.url              = st->url;
         o.auth             = st->auth[0] ? st->auth : NULL;
         o.reconnect        = switch_true(switch_channel_get_variable(channel, "EARSHOT_NO_RECONNECT")) ? 0 : 1;
+        /* Timers: the start option wins, else the channel variable, else the default. */
+        o.connect_timeout_ms = st->connect_timeout_ms ? st->connect_timeout_ms
+                             : es_timer_ms(switch_channel_get_variable(channel, "EARSHOT_CONNECT_TIMEOUT"));
+        o.liveness_ms        = st->liveness_ms ? st->liveness_ms
+                             : es_timer_ms(switch_channel_get_variable(channel, "EARSHOT_LIVENESS"));
+        o.ping_ms            = st->ping_ms ? st->ping_ms
+                             : es_timer_ms(switch_channel_get_variable(channel, "EARSHOT_PING"));
+        {   /* when to stop reconnecting: the start option wins, else the channel variable, else never */
+            const char *rm = switch_channel_get_variable(channel, "EARSHOT_RECONNECT_MAX");
+            int rd = es_timer_ms(switch_channel_get_variable(channel, "EARSHOT_RECONNECT_DEADLINE"));
+            o.reconnect_max         = st->reconnect_max ? st->reconnect_max : (rm && atoi(rm) > 0 ? atoi(rm) : 0);
+            o.reconnect_deadline_ms = st->reconnect_deadline_ms ? st->reconnect_deadline_ms : (rd > 0 ? rd : 0);
+        }
         o.user             = st;
         o.on_event         = es_on_ws_event;
         o.on_binary        = es_on_ws_binary;
@@ -1285,6 +1411,7 @@ static switch_status_t es_start_stream(switch_core_session_t *session, int argc,
             stream->write_function(stream, "-ERR could not open websocket to %s\n", es_url_for_display(st, shown, sizeof shown));
             if (st->ws) { es_ws_destroy(st->ws); st->ws = NULL; }
             es_proto_destroy(st->proto_ctx); st->proto_ctx = NULL;
+            if (st->vad) switch_vad_destroy(&st->vad);
             if (st->play_buf) switch_buffer_destroy(&st->play_buf);
             return SWITCH_STATUS_FALSE;
         }
@@ -1311,13 +1438,14 @@ static switch_status_t es_start_stream(switch_core_session_t *session, int argc,
         stream->write_function(stream, "-ERR could not attach media bug\n");
         es_ws_destroy(st->ws); st->ws = NULL;
         es_proto_destroy(st->proto_ctx); st->proto_ctx = NULL;
+        if (st->vad) switch_vad_destroy(&st->vad);
         if (st->play_buf) switch_buffer_destroy(&st->play_buf);
         return SWITCH_STATUS_FALSE;
     }
     switch_channel_set_private(channel, es_privkey(session, st->id), st);
     /* register the caller-DTMF hook once per channel — on the default (unnamed) stream */
     if (!st->id[0]) { st->owns_dtmf_hook = SWITCH_TRUE; switch_core_event_hook_add_recv_dtmf(session, es_dtmf_hook); }
-    es_fire_event(session, EARSHOT_EVENT_CONNECTED, "url", es_url_for_display(st, shown, sizeof shown));
+    /* earshot::connected is fired when the agent's handshake completes (es_on_ws_event). */
     stream->write_function(stream, "+OK stream '%s' started\n", st->id[0] ? st->id : "default");
     return SWITCH_STATUS_SUCCESS;
 }
@@ -1329,8 +1457,24 @@ static switch_status_t es_simple(switch_core_session_t *session, const char *ver
     es_stream_t *st = (es_stream_t *) switch_channel_get_private(channel, es_privkey(session, id));
     if (!st) { stream->write_function(stream, "-ERR no active earshot stream '%s'\n", id && id[0] ? id : "default"); return SWITCH_STATUS_FALSE; }
 
+    /* A verb can arrive on any thread while another thread is tearing the stream down
+     * (a `stop`, a hangup). The private is cleared first in CLOSE, but this thread may
+     * have read it just before: so every verb runs under the life lock and gives up if
+     * teardown has begun. st is session memory, valid while this thread holds the session. */
+    switch_mutex_lock(st->cmd_ws_mutex);
+    if (st->closed || st->stopping) {
+        switch_mutex_unlock(st->cmd_ws_mutex);
+        stream->write_function(stream, "-ERR earshot stream '%s' is closing\n", id && id[0] ? id : "default");
+        return SWITCH_STATUS_FALSE;
+    }
     if (!strcasecmp(verb, "stop")) {
+        /* Removing the bug runs CLOSE on this thread, which takes the life lock itself;
+         * `stopping` keeps a second `stop` and every other verb out in the meantime. */
+        st->stopping = SWITCH_TRUE;
+        switch_mutex_unlock(st->cmd_ws_mutex);
         switch_core_media_bug_remove(session, &st->bug);   /* triggers CLOSE -> teardown (clears private) */
+        stream->write_function(stream, "+OK %s\n", verb);
+        return SWITCH_STATUS_SUCCESS;
     } else if (!strcasecmp(verb, "pause")) {
         /* freeze both directions: caller audio stops going to the agent and queued agent audio is
          * held (not dropped). This is what mod_audio_stream's `pause` means and what controllers
@@ -1351,6 +1495,7 @@ static switch_status_t es_simple(switch_core_session_t *session, const char *ver
             st->ws ? es_ws_connected(st->ws) : 0, ES_LOAD(st->ready), ES_LOAD(st->paused),
             (unsigned long long) st->rx_frames,
             st->play_buf ? (unsigned) switch_buffer_inuse(st->play_buf) : 0);
+        switch_mutex_unlock(st->cmd_ws_mutex);
         return SWITCH_STATUS_SUCCESS;
     }
     else if (!strcasecmp(verb, "metrics")) {
@@ -1373,9 +1518,11 @@ static switch_status_t es_simple(switch_core_session_t *session, const char *ver
             (unsigned long long) st->first_audio_ms, (unsigned long long) st->resp_ms_last,
             (unsigned long long) st->resp_ms_max, (unsigned long long) st->turns,
             ws.connected, ws.reconnects, (unsigned long long) ws.queue_drops, ws.rtt_ms);
+        switch_mutex_unlock(st->cmd_ws_mutex);
         return SWITCH_STATUS_SUCCESS;
     }
 
+    switch_mutex_unlock(st->cmd_ws_mutex);
     stream->write_function(stream, "+OK %s\n", verb);
     return SWITCH_STATUS_SUCCESS;
 }
@@ -1419,9 +1566,16 @@ static switch_status_t es_send_text_cmd(switch_core_session_t *session, const ch
 {
     switch_channel_t *channel = switch_core_session_get_channel(session);
     es_stream_t *st = (es_stream_t *) switch_channel_get_private(channel, es_privkey(session, id));
-    if (!st || !st->ws) { stream->write_function(stream, "-ERR no active earshot stream\n"); return SWITCH_STATUS_FALSE; }
-    if (zstr(text))     { stream->write_function(stream, "-ERR send needs text\n"); return SWITCH_STATUS_FALSE; }
+    if (!st)        { stream->write_function(stream, "-ERR no active earshot stream\n"); return SWITCH_STATUS_FALSE; }
+    if (zstr(text)) { stream->write_function(stream, "-ERR send needs text\n"); return SWITCH_STATUS_FALSE; }
+    switch_mutex_lock(st->cmd_ws_mutex);               /* see es_simple: the stream may be closing on another thread */
+    if (st->closed || st->stopping || !st->ws) {
+        switch_mutex_unlock(st->cmd_ws_mutex);
+        stream->write_function(stream, "-ERR no active earshot stream\n");
+        return SWITCH_STATUS_FALSE;
+    }
     es_ws_send_text(st->ws, text, strlen(text));
+    switch_mutex_unlock(st->cmd_ws_mutex);
     stream->write_function(stream, "+OK send\n");
     return SWITCH_STATUS_SUCCESS;
 }
@@ -1607,6 +1761,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_earshot_load)
 
     /* reserve the custom event subclasses so subclass-filtered subscribers receive them */
     switch_event_reserve_subclass(EARSHOT_EVENT_CONNECTED);
+    switch_event_reserve_subclass(EARSHOT_EVENT_RECONNECTED);
     switch_event_reserve_subclass(EARSHOT_EVENT_DISCONNECTED);
     switch_event_reserve_subclass(EARSHOT_EVENT_ERROR);
     switch_event_reserve_subclass(EARSHOT_EVENT_METRICS);
@@ -1741,6 +1896,7 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_earshot_shutdown)
     }
     es_ws_global_shutdown();   /* join the shared WS service-thread pool before we're unmapped */
     switch_event_free_subclass(EARSHOT_EVENT_CONNECTED);
+    switch_event_free_subclass(EARSHOT_EVENT_RECONNECTED);
     switch_event_free_subclass(EARSHOT_EVENT_DISCONNECTED);
     switch_event_free_subclass(EARSHOT_EVENT_ERROR);
     switch_event_free_subclass(EARSHOT_EVENT_METRICS);

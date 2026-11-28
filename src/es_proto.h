@@ -107,9 +107,20 @@ void            es_proto_set_ws(es_proto_ctx_t *p, es_ws_t *ws);
 /* Borrowed allowlist (must outlive the ctx) of variable names the `setvar` command may set;
  * NULL or empty means no variable is settable (fail closed). */
 void            es_proto_set_setvar_allow(es_proto_ctx_t *p, const char *csv);
+/* Borrowed operator allowlists (must outlive the ctx; NULL = none) for the arguments an agent
+ * supplies on the control channel: extra transfer dialplans (`dialplans=`), directories an
+ * absolute record path may lie under (`record_dir=`), and stream schemes play and record may
+ * use beyond the harmless built-ins (`media_schemes=`). See es_cmdguard.h. */
+void            es_proto_set_cmd_policy(es_proto_ctx_t *p, const char *dialplans_csv,
+                                        const char *record_dirs_csv, const char *media_schemes_csv);
+/* Directory a relative `record` path is written under (borrowed; must outlive the ctx). */
+void            es_proto_set_record_base(es_proto_ctx_t *p, const char *dir);
 
 /* Lifecycle preamble/postamble (Twilio connected+start / stop; no-op for native). */
 void es_proto_send_start(es_proto_ctx_t *p, es_ws_t *ws);
+/* Call once per frame of caller audio, sent (audio_sent=1) or withheld by pause or a masking
+ * window (0), with a monotonic clock in ms: lets an adapter keep an idle session alive. */
+void es_proto_tick(es_proto_ctx_t *p, es_ws_t *ws, long now_ms, int audio_sent);
 void es_proto_send_stop (es_proto_ctx_t *p, es_ws_t *ws);
 
 /* Outbound caller audio (L16) -> wire (native binary / Twilio media JSON). */

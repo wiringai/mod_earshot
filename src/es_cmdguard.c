@@ -100,3 +100,78 @@ int es_cmd_name_in_list(const char *csv, const char *name)
     }
     return 0;
 }
+
+/* Case-insensitive membership of the first `nl` bytes of `name` in a comma-separated list. */
+static int in_list_ci(const char *csv, const char *name, size_t nl)
+{
+    const char *p = csv;
+    if (!nl || !csv) return 0;
+    while (*p) {
+        size_t seg, t;
+        while (*p == ',' || *p == ' ') p++;
+        seg = strcspn(p, ",");
+        t = seg;
+        while (t && p[t - 1] == ' ') t--;
+        if (t == nl && !strncasecmp(p, name, nl)) return 1;
+        p += seg;
+        if (*p == ',') p++;
+    }
+    return 0;
+}
+
+int es_cmd_dialplan_allowed(const char *operator_csv, const char *dialplan)
+{
+    if (!dialplan || !*dialplan) return 1;
+    if (!es_cmd_dialplan_ok(dialplan)) return 0;               /* inline, spaces, app::args: never */
+    if (!strcasecmp(dialplan, "XML")) return 1;
+    return in_list_ci(operator_csv, dialplan, strlen(dialplan));
+}
+
+/* The scheme of "scheme://rest" as a length, 0 when `s` is not of that form. */
+static size_t scheme_len(const char *s)
+{
+    const char *sep = s ? strstr(s, "://") : 0;
+    return sep ? (size_t) (sep - s) : 0;
+}
+
+static int scheme_allowed(const char *operator_csv, const char *s, size_t n, int builtin_ok)
+{
+    static const char *const harmless[] = { "tone_stream", "silence_stream", "local_stream", 0 };
+    int i;
+    if (builtin_ok)
+        for (i = 0; harmless[i]; i++)
+            if (strlen(harmless[i]) == n && !strncasecmp(s, harmless[i], n)) return 1;
+    return in_list_ci(operator_csv, s, n);
+}
+
+int es_cmd_media_ok(const char *operator_schemes_csv, const char *file)
+{
+    size_t n;
+    if (!es_cmd_token_ok(file)) return 0;
+    if (strstr(file, "://") == file) return 0;                 /* "://x": no scheme at all */
+    n = scheme_len(file);
+    return n ? scheme_allowed(operator_schemes_csv, file, n, 1) : 1;
+}
+
+int es_cmd_record_ok(const char *operator_dirs_csv, const char *operator_schemes_csv, const char *file)
+{
+    size_t n;
+    const char *p = operator_dirs_csv;
+    if (!es_cmd_recpath_ok(file)) return 0;
+    if (strstr(file, "://") == file) return 0;
+    n = scheme_len(file);
+    if (n) return scheme_allowed(operator_schemes_csv, file, n, 0);   /* nothing is harmless to record to */
+    if (file[0] != '/') return 1;                              /* relative: FreeSWITCH's recordings directory */
+    if (!p) return 0;
+    while (*p) {                                               /* absolute: under a named directory */
+        size_t seg, t;
+        while (*p == ',' || *p == ' ') p++;
+        seg = strcspn(p, ",");
+        t = seg;
+        while (t && (p[t - 1] == ' ' || p[t - 1] == '/')) t--; /* "/var/rec/" and "/var/rec" are the same directory */
+        if (t && p[0] == '/' && !strncmp(file, p, t) && file[t] == '/') return 1;
+        p += seg;
+        if (*p == ',') p++;
+    }
+    return 0;
+}

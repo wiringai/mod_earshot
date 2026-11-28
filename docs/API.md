@@ -84,7 +84,9 @@ Off by default; unknown/disabled → `{"ok":false,"error":…}`.
 
 | Event | Key headers | Fires when |
 |---|---|---|
-| `earshot::connected` | `url` | WS handshake completes |
+| `earshot::connected` | `url` | the agent's WebSocket handshake completes for the first time |
+| `earshot::reconnected` | `url` | a later connection completes, after the first was lost |
+| `earshot::error` | `reason` | a connection attempt failed (`connect timeout`, the library's reason), or `gave_up` once reconnecting stops (`reconnect_max=` / `reconnect_deadline=`; also sets `earshot_failed=true`) |
 | `earshot::ready` | `corr` | playback gate opens (also sets `earshot_ready=true`) |
 | `earshot::speech_started` / `earshot::speech_stopped` | `corr` | VAD turn boundaries (sets `earshot_talking`) |
 | `earshot::dtmf` | `digit` or `masked` | caller DTMF (`masked=true`, digit redacted, during a mask window) |
@@ -140,13 +142,20 @@ Full framing details in [FEATURES.md](../FEATURES.md#2-protocol-adapters--); in 
 - **`native`** — raw binary frames + `{"type":"playAudio"|"clear"}` JSON control.
 - **`twilio`** — Twilio Media Streams (`connected`/`start`/`media`/`mark`, base64 µ-law, mark echo).
 - **`openai`** — OpenAI Realtime (`session.update`, `input_audio_buffer.append`, `response.output_audio.delta`; `realtime` subprotocol, auth via `EARSHOT_AUTH`).
-- **`deepgram`** — Deepgram Voice Agent (`Settings`, raw binary audio, `UserStartedSpeaking`).
+- **`deepgram`** — Deepgram Voice Agent (`Settings`, raw binary audio, `UserStartedSpeaking`); a `KeepAlive` every
+  8 seconds while the stream is paused or masked, so the session survives it).
 - **`vapi`** — Vapi WebSocket transport (raw binary audio, `speech-update`/`user-interrupted` control). The
   operator does a REST `POST /call` with `transport.provider="vapi.websocket"` and passes the returned
   per-call `websocketCallUrl` as the `start` url; match `codec=`/`rate=` to the call's `audioFormat`
   (e.g. `codec=l16 rate=16000` ↔ `pcm_s16le`/16000, or `codec=pcmu rate=8000` ↔ `mulaw`/8000).
 - **`elevenlabs`** — ElevenLabs Conversational AI (`user_audio_chunk` / `{type:audio}`, auto `ping`→`pong`).
-- **`gemini`** — Gemini Live (`setup`, `realtimeInput.mediaChunks` 16k / `serverContent` 24k; resampled).
+  The audio formats are settings of the agent at ElevenLabs. Its output is played in whatever
+  format it announces (`pcm_<rate>` or `ulaw_8000`); start the stream with the `codec=` and `rate=`
+  that match its **input** format (`codec=pcmu rate=8000` for `ulaw_8000`, `codec=l16 rate=16000`
+  for `pcm_16000`), or the log will say the agent cannot understand the caller.
+- **`gemini`** — Gemini Live (`setup`, then `realtimeInput.audio` at 16 kHz once the server sends
+  `setupComplete`; `serverContent` at 24 kHz back; resampled). The default model is
+  `models/gemini-3.8-live`; name your own in `EARSHOT_SESSION_CONFIG`.
 - **`pipecat`** — Pipecat protobuf `Frame{ audio: AudioRawFrame }` (binary L16).
 - **`assemblyai`** — AssemblyAI Universal-Streaming **STT** (`wss://streaming.assemblyai.com/v3/ws?sample_rate=…`).
   Transcription only: PCM16 audio out (`codec=l16`, coalesced to ≥50 ms chunks), `transcript` JSON in →
@@ -176,6 +185,11 @@ stream.
 | `EARSHOT_META` | opaque caller context → `X-Earshot-Meta` handshake header (see [Caller context](#caller-context)) |
 | `EARSHOT_GREETING` | welcome-audio file path (alternative to `greeting=` for paths with spaces) |
 | `EARSHOT_NO_RECONNECT` | disable auto-reconnect (default: reconnect with jittered backoff) |
+| `EARSHOT_CONNECT_TIMEOUT` | seconds one connection attempt may take before it is abandoned (default 20, range 1 to 120); the `connect_timeout=` start option wins |
+| `EARSHOT_LIVENESS` | seconds a connected agent may send nothing, not even a pong, before it is dropped (default 20, minimum 2; `off` disables); the `liveness=` start option wins |
+| `EARSHOT_PING` | seconds between WebSocket pings (default 5, minimum 1, at most half of the liveness window); the `ping=` start option wins |
+| `EARSHOT_RECONNECT_MAX` | failed attempts in a row after which the stream stops reconnecting (default: no limit); the `reconnect_max=` start option wins |
+| `EARSHOT_RECONNECT_DEADLINE` | seconds the stream may stay down before it stops reconnecting (default: no limit); the `reconnect_deadline=` start option wins |
 | `EARSHOT_TLS_NO_HOSTNAME_CHECK` | skip wss cert/hostname checks (dev only) |
 | `earshot_ready` / `earshot_talking` / `earshot_masking` | **set by** Earshot for dialplan logic |
 

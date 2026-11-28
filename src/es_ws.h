@@ -19,7 +19,8 @@ typedef struct es_ws es_ws_t;
 /* Callbacks run on the service thread; keep them fast and non-blocking. */
 typedef void (*es_ws_on_text_fn)(void *user, const char *data, size_t len);
 typedef void (*es_ws_on_binary_fn)(void *user, const void *data, size_t len);
-/* connected=1 on open; connected=0 on close/error (code+reason may be set).
+/* connected=1 on open; connected=0 on close/error (code+reason may be set): code 0 is a
+ * close, -1 a failed attempt, ES_WS_GAVE_UP the end of reconnecting.
  * What the owner sends from inside the connected=1 call is the first thing the new
  * connection carries (the place for a protocol preamble). On a reconnect, anything that
  * was still queued for the lost connection is dropped, not replayed. */
@@ -61,7 +62,42 @@ typedef struct {
      * client TLS material at context (not per-wsi) level. Distinct per-stream certs would
      * still require partitioning streams onto their own context (a future item). */
     int                insecure;     /* skip cert/hostname checks (dev only) */
+    /* Timers, in milliseconds. 0 keeps the default; out-of-range values are clamped.
+     *   connect_timeout_ms  how long one connection attempt may take, from the TCP connect to
+     *                       the end of the WebSocket handshake, before it is abandoned (and,
+     *                       with reconnect, retried). Default 20000, range 1000..120000. An
+     *                       agent behind a cold-starting platform can hold the handshake open
+     *                       for tens of seconds; abandoning it early only starts a second
+     *                       session next to the first.
+     *   liveness_ms         a connected peer that sends nothing (no frame, no pong) for this
+     *                       long is taken for dead and dropped. Default 20000, minimum 2000;
+     *                       negative switches the check off.
+     *   ping_ms             how often a ping is sent while connected. Default 5000, minimum
+     *                       1000, and never more than half of liveness_ms: liveness is only
+     *                       meaningful if pings are sent well inside it. */
+    int                connect_timeout_ms;
+    int                liveness_ms;
+    int                ping_ms;
+    /* When to stop reconnecting (both 0 = never stop, as before). Counted from the moment
+     * the connection was lost, or from the start if it never came up; a connection that
+     * establishes resets both.
+     *   reconnect_max          give up after this many failed attempts in a row
+     *   reconnect_deadline_ms  give up once the stream has been down this long
+     * Giving up is reported once through on_event with connected=0 and code
+     * ES_WS_GAVE_UP; the stream then stays down until it is stopped. */
+    int                reconnect_max;
+    int                reconnect_deadline_ms;
 } es_ws_opts_t;
+
+#define ES_WS_GAVE_UP (-2)   /* on_event code: reconnecting was abandoned (see reconnect_max) */
+
+#define ES_WS_CONNECT_TIMEOUT_DEFAULT_MS 20000
+#define ES_WS_CONNECT_TIMEOUT_MIN_MS      1000
+#define ES_WS_CONNECT_TIMEOUT_MAX_MS    120000
+#define ES_WS_LIVENESS_DEFAULT_MS        20000
+#define ES_WS_LIVENESS_MIN_MS             2000
+#define ES_WS_PING_DEFAULT_MS             5000
+#define ES_WS_PING_MIN_MS                 1000
 
 /* transport counters for metrics (all monotonically increasing) */
 typedef struct {

@@ -5,6 +5,88 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 
 ## [Unreleased]
 
+### Added
+- **A live test rig**: `test/live/run.sh` runs real calls through the module on a real
+  FreeSWITCH in one container (no carrier, no keys): audio both ways, the events, every
+  command refusal, reconnect, timeouts, the Twilio dialect, and commands racing a stop or a
+  hangup, with an AddressSanitizer mode. See `test/live/README.md`.
+- **The connection timers are settable per stream.** `connect_timeout=<seconds>` (how long one
+  connection attempt may take, default 20, 1 to 120), `liveness=<seconds>|off` (how long a
+  connected agent may send nothing, not even a pong, before it is dropped; default 20) and
+  `ping=<seconds>` (default 5), as `start` options or the `EARSHOT_CONNECT_TIMEOUT`,
+  `EARSHOT_LIVENESS` and `EARSHOT_PING` channel variables. The defaults are what they were.
+  The connect timeout used to be libwebsockets' own, fixed at 20 seconds: an agent on a
+  platform that holds the handshake open while it starts (a cold serverless instance) was
+  abandoned at 20 seconds and reconnected to, which left the first session running next to
+  the second. A stream can now wait longer for it, or give up sooner.
+- A connection attempt that is abandoned reports `connect timeout` as its reason, once.
+
+- **A stream can stop reconnecting.** `reconnect_max=<attempts>` and
+  `reconnect_deadline=<seconds>` (or `EARSHOT_RECONNECT_MAX` / `EARSHOT_RECONNECT_DEADLINE`)
+  end the retries after that many failed attempts in a row, or once the agent has been gone
+  that long. The stream then fires one `earshot::error` with `reason=gave_up` and sets
+  `earshot_failed=true` on the channel, so a dialplan can fall back to a person. With neither
+  set a stream keeps trying, as before.
+- `earshot::reconnected`, fired when a later connection completes.
+
+### Changed (check your dialplans)
+- **`earshot::connected` fires when the agent's handshake completes**, as documented. It used
+  to fire as soon as `start` returned, before any connection existed, so an unreachable agent
+  produced `connected` followed by errors. It now fires once, on the first connection; an
+  application that treated it as "stream started" should use the `+OK` reply to `start`.
+- **Agent commands: `transfer`, `play` and `record` arguments are allowlisted.** An agent
+  granted these actions could name any dialplan but `inline` (so `LUA:script.lua` ran a script
+  as the dialplan), play any URL (`http://`, `shout://`: a request from inside your network to
+  an address the agent chose) and record to any absolute path FreeSWITCH can write, or to a
+  stream that leaves the box. Now:
+  - `transfer` may name only the `XML` dialplan, unless `dialplans=<name,...>` lists another;
+  - `record` takes a relative path, or an absolute path under `record_dir=<dir,...>`. **With
+    no `record_dir=`, an absolute record path is refused**;
+  - `play` and `record` refuse stream schemes unless `media_schemes=<scheme,...>` lists them
+    (`tone_stream`, `silence_stream` and `local_stream` stay allowed for `play`).
+- **A command whose API failed reports `ok:false`.** FreeSWITCH's `uuid_*` APIs return
+  success and put `-ERR ...` in their output; the `command_result` sent to the agent and the
+  `earshot::command` audit said `ok:true`. Both now say `ok:false` with the reason in `error`.
+
+### Fixed
+- **ElevenLabs: the agent's audio is played in the format the agent announces.** The audio
+  format is a setting of the agent at ElevenLabs, sent in `conversation_initiation_metadata`;
+  the adapter ignored it and decoded with the stream's `codec=`/`rate=`, so an agent set to
+  `pcm_16000` behind a stream started with the defaults played as noise. Output now follows
+  the announcement (`pcm_<rate>` or `ulaw_8000`). The format the agent expects from the
+  caller cannot be changed in mid-call: a mismatch is logged once, with the `codec=` and
+  `rate=` that fix it.
+- **Gemini Live: caller audio waits for `setupComplete`**, as the API requires, on every
+  connection. The default model is now `models/gemini-3.8-live`; the old default used a
+  `-latest` alias that no Live model has. Name your model in `EARSHOT_SESSION_CONFIG`.
+- **Deepgram Voice Agent: a paused or masked stream is kept alive.** With no audio going out,
+  Deepgram closes the session (`CLIENT_MESSAGE_TIMEOUT`). The adapter now sends
+  `{"type":"KeepAlive"}` every 8 seconds while audio is withheld, and none while it flows.
+- **Twilio dialect: the echoed `mark` and the `dtmf` message carry a `sequenceNumber`**, in
+  step with `start`, `media` and `stop`, as Twilio's do.
+- **A stream that stops now closes its WebSocket properly.** Stopping used to cut the
+  connection: the agent saw an abnormal close (1006) on every call end, and a message queued
+  just before the stop, such as the Twilio dialect's `stop`, was never sent. What is queued is
+  now sent first, then a Close frame with status 1000. This is bounded at 150 ms, so an agent
+  that has stopped reading cannot delay a hangup or a transfer; a healthy agent takes a few
+  milliseconds. It holds when the agent is talking at that moment, the usual case when a
+  caller hangs up in mid-sentence.
+- **An agent's `record` to a relative path goes to FreeSWITCH's recordings directory.**
+  FreeSWITCH resolves a relative record path against the channel's `sound_prefix`, the
+  directory its prompts are played from, so `record` with `file: "x.wav"` wrote among the
+  prompts (where an agent could overwrite one) and a later `stop` by the same name failed.
+  The module now writes it under the recordings directory, on start and on stop. **If you
+  collected agent recordings from the prompts directory, look in `recordings/` instead.**
+- **Commands that arrive while a stream is closing can no longer crash FreeSWITCH.** `flush`,
+  `status`, `metrics` and `send` from the event socket, and a caller's DTMF digit, could run on
+  one thread while another thread tore the same stream down, and use its playback buffer or
+  connection after they were freed (an assertion or a use-after-free, in a window of tens of
+  milliseconds around every stop and hangup). Teardown and every verb now run under one
+  per-stream lock; a verb that loses the race answers `-ERR ... is closing`.
+- A second `stop` for a stream that is already stopping is refused; it used to remove the
+  media bug twice.
+- A `start` that failed after voice-activity detection was set up leaked the detector.
+
 ## [0.4.2] — 2026-11-18
 
 A hardening release. Upgrade if agents you do not fully control can connect, if API keys

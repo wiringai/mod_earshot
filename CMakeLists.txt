@@ -61,6 +61,17 @@ if(EARSHOT_TESTS)
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   add_test(NAME proto_audio COMMAND test_proto_audio)
 
+  # What each vendor adapter sends and how it reads the vendor's replies (Twilio sequence
+  # numbers, Gemini's setup wait, ElevenLabs' announced format, Deepgram's KeepAlive).
+  add_executable(test_adapters
+    test/test_adapters.c
+    test/support/command_dispatch_stubs.c
+    src/es_proto.c src/es_cmdguard.c src/es_codec.c src/es_pb.c)
+  target_include_directories(test_adapters PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/support
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  add_test(NAME adapters COMMAND test_adapters)
+
   # The WebSocket transport on a context with one stream and no traffic: teardown and
   # reconnect must not depend on other streams' socket events. Needs libwebsockets (an
   # in-process loopback server plays the agent); skipped where it is not installed.
@@ -83,6 +94,23 @@ if(EARSHOT_TESTS)
     target_link_directories(test_ws_reconnect PRIVATE ${LWS_TEST_LIBRARY_DIRS})
     target_link_libraries(test_ws_reconnect PRIVATE ${LWS_TEST_LIBRARIES} Threads::Threads)
     add_test(NAME ws_reconnect COMMAND test_ws_reconnect)
+
+    # Connect timeout, liveness window and their defaults, against a far end that never
+    # answers or goes silent after the handshake. Takes about 45 s: one case waits past
+    # libwebsockets' own 20-second limit on purpose.
+    add_executable(test_ws_timeouts test/test_ws_timeouts.c src/es_ws.c)
+    target_include_directories(test_ws_timeouts PRIVATE ${LWS_TEST_INCLUDE_DIRS})
+    target_link_directories(test_ws_timeouts PRIVATE ${LWS_TEST_LIBRARY_DIRS})
+    target_link_libraries(test_ws_timeouts PRIVATE ${LWS_TEST_LIBRARIES} Threads::Threads)
+    add_test(NAME ws_timeouts COMMAND test_ws_timeouts)
+
+    # A stop ends the connection cleanly (queued message delivered, Close 1000) and
+    # promptly, even against an agent that has stopped reading.
+    add_executable(test_ws_close test/test_ws_close.c src/es_ws.c)
+    target_include_directories(test_ws_close PRIVATE ${LWS_TEST_INCLUDE_DIRS})
+    target_link_directories(test_ws_close PRIVATE ${LWS_TEST_LIBRARY_DIRS})
+    target_link_libraries(test_ws_close PRIVATE ${LWS_TEST_LIBRARIES} Threads::Threads)
+    add_test(NAME ws_close COMMAND test_ws_close)
   endif()
 endif()
 

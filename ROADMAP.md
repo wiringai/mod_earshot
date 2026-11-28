@@ -50,7 +50,9 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
   **VALIDATED on real calls**: 8k↔16k and 8k↔24k both directions, amplitude preserved (WRITE max 7998 ≈
   source 8000, rms 5631 ≈ clean-tone 5657), byte counts exactly 4×/6× — no distortion.
   Wire codec/rate via `codec=l16 rate=16000|24000`; default stays g711 8k.
-- ☐ Graceful teardown races (stop while playing / during reconnect) — no leaks, no stuck channels
+- ☑ Graceful teardown: a stop sends what is queued and a Close(1000) within 150 ms, and API verbs or DTMF
+  that race a teardown are fenced by one per-stream lock (0.4.3). Covered by `test/test_ws_close.c`; the
+  verb race is fixed by construction, not yet by a stress test on a live FreeSWITCH.
 - ◐ Structured logging with the channel UUID + Call-ID (mark/ready lifecycle logs in place)
 
 ## Tier 2 — The adoption unlock
@@ -93,7 +95,7 @@ Legend: ☐ todo · ◐ in progress · ☑ done · ✗ considered, rejected
   record / setvar / hold / bridge / park), fires an `earshot::command` audit event, and echoes a
   `command_result`. Turns LLM tool calls into real telephony actions. **VALIDATED**: `setvar` executed
   mid-call (`uuid_getvar` confirmed the side effect) + `ok:true` echoed + event fired; refused with
-  `error:disabled` when the gate is off. ☐ next: per-action scoping (`commands=transfer,hangup`).
+  `error:disabled` when the gate is off. ☑ per-action scoping (`commands=transfer,hangup`).
 - ☑ **Correlation-first handshake**: `X-Call-ID`/`X-Channel-UUID`/`X-Correlation-ID` headers on the
   WS handshake, and (Twilio) `earshot_call_id`+`earshot_channel_uuid` in `start.customParameters`.
 - ☑ **Caller context + welcome greeting**: `EARSHOT_META` → `X-Earshot-Meta` handshake header (opaque

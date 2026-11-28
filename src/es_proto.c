@@ -27,9 +27,17 @@ struct es_proto_ctx {
     char            channel_uuid[64];
     char           *cfg;        /* verbatim session-config JSON (openai/deepgram), or NULL */
     const char     *setvar_allow; /* commands setvar: operator allowlist of settable var names (setvars=); NULL=none */
+    const char     *dialplan_allow;  /* dialplans=: transfer dialplans beyond XML; NULL=none */
+    const char     *record_dirs;     /* record_dir=: directories an absolute record path may lie under; NULL=none */
+    const char     *record_base;     /* where a relative record path is written; NULL = left to FreeSWITCH */
+    const char     *media_schemes;   /* media_schemes=: stream schemes play/record may use; NULL=built-ins only */
     uint64_t        out_seq;    /* Twilio sequenceNumber */
     uint64_t        out_chunk;  /* Twilio media chunk */
     uint64_t        out_ts;     /* cumulative media timestamp (ms) */
+    volatile int    setup_done; /* gemini: the server answered `setup` with setupComplete; audio waits for it */
+    es_codec_t      in_codec;   /* elevenlabs: the format the agent said its audio is in */
+    int             fmt_warned; /* elevenlabs: a mismatch of the caller-audio format was already logged */
+    long            last_tx_ms; /* deepgram: when caller audio or a KeepAlive last went out */
     uint8_t         agg[8192];  /* assemblyai: coalesce ~20ms frames into >=50ms chunks (AAI err 3007) */
     size_t          agg_len;
 };
@@ -147,6 +155,7 @@ es_proto_ctx_t *es_proto_create(es_proto_kind_t kind, es_codec_t codec,
     if (!p) return NULL;
     p->kind      = kind;
     p->codec     = codec;
+    p->in_codec  = codec;
     p->rate      = wire_rate > 0 ? wire_rate : 8000;
     p->rate_out  = p->rate;
     p->chan_rate = chan_rate > 0 ? chan_rate : 8000;
@@ -172,6 +181,20 @@ void es_proto_set_ws(es_proto_ctx_t *p, es_ws_t *ws) { if (p) p->ws = ws; }
 /* Operator allowlist of channel-variable names the agent may set via the `setvar` command.
  * The pointer is borrowed (must outlive the ctx); NULL/empty means no variable is settable. */
 void es_proto_set_setvar_allow(es_proto_ctx_t *p, const char *csv) { if (p) p->setvar_allow = csv; }
+void es_proto_set_cmd_policy(es_proto_ctx_t *p, const char *dialplans_csv,
+                             const char *record_dirs_csv, const char *media_schemes_csv)
+{
+    if (!p) return;
+    p->dialplan_allow = dialplans_csv; p->record_dirs = record_dirs_csv; p->media_schemes = media_schemes_csv;
+}
+
+/* The directory a relative record path is written under. FreeSWITCH itself would resolve
+ * it against the channel's sound_prefix, the directory its prompts are played from, where
+ * an agent could overwrite a prompt; the module names its recordings directory instead. */
+void es_proto_set_record_base(es_proto_ctx_t *p, const char *dir)
+{
+    if (p) p->record_base = (dir && *dir) ? dir : NULL;
+}
 
 void es_proto_destroy(es_proto_ctx_t *p)
 {
@@ -233,11 +256,17 @@ void es_proto_send_start(es_proto_ctx_t *p, es_ws_t *ws)
     }
 
     if (p->kind == ES_PROTO_GEMINI) {                 /* setup must be the first message */
+        /* Nothing else may be sent until the server answers with setupComplete (the API
+         * reference: "Clients should wait ... before sending any additional messages"), on
+         * every connection, so a reconnect waits again. */
+        p->setup_done = 0;
         if (p->cfg) { es_send_text_z(ws, p->cfg); return; }
-        /* Live model names churn fast; the "…-latest" alias is the most stable default. Operators
-         * normally supply model/voice/system-prompt via EARSHOT_SESSION_CONFIG (sent verbatim above). */
+        /* The stable Live model at the time of writing. There is no "-latest" alias for a
+         * Live model, and the 2.5 native-audio names this default used before are previews
+         * that get retired, so operators should name their model, voice and system prompt in
+         * EARSHOT_SESSION_CONFIG (sent verbatim above) rather than rely on this. */
         es_send_text_z(ws,
-            "{\"setup\":{\"model\":\"models/gemini-2.5-flash-native-audio-latest\","
+            "{\"setup\":{\"model\":\"models/gemini-3.8-live\","
             "\"generationConfig\":{\"responseModalities\":[\"AUDIO\"]}}}");
         return;
     }
@@ -266,8 +295,8 @@ void es_proto_send_mark(es_proto_ctx_t *p, es_ws_t *ws, const char *name)
     char msg[256];
     if (!p || !ws || p->kind != ES_PROTO_TWILIO || !name) return;
     snprintf(msg, sizeof msg,
-        "{\"event\":\"mark\",\"streamSid\":\"%s\",\"mark\":{\"name\":\"%s\"}}",
-        p->stream_sid, name);
+        "{\"event\":\"mark\",\"sequenceNumber\":\"%llu\",\"streamSid\":\"%s\",\"mark\":{\"name\":\"%s\"}}",
+        (unsigned long long)++p->out_seq, p->stream_sid, name);
     es_send_text_z(ws, msg);
 }
 
@@ -277,8 +306,9 @@ void es_proto_send_dtmf(es_proto_ctx_t *p, es_ws_t *ws, const char *digit)
     if (!p || !ws || !digit) return;
     if (p->kind == ES_PROTO_TWILIO)
         snprintf(msg, sizeof msg,
-                 "{\"event\":\"dtmf\",\"streamSid\":\"%s\",\"dtmf\":{\"track\":\"inbound\",\"digit\":\"%s\"}}",
-                 p->stream_sid, digit);
+                 "{\"event\":\"dtmf\",\"streamSid\":\"%s\",\"sequenceNumber\":\"%llu\","
+                 "\"dtmf\":{\"track\":\"inbound\",\"digit\":\"%s\"}}",
+                 p->stream_sid, (unsigned long long)++p->out_seq, digit);
     else
         snprintf(msg, sizeof msg, "{\"type\":\"dtmf\",\"digit\":\"%s\"}", digit);
     es_send_text_z(ws, msg);
@@ -290,6 +320,7 @@ void es_proto_send_audio(es_proto_ctx_t *p, es_ws_t *ws, const int16_t *pcm, siz
     uint8_t enc[SWITCH_RECOMMENDED_BUFFER_SIZE];
     size_t  nb;
     if (!p || !ws || !pcm || !nsamples) return;
+    if (p->kind == ES_PROTO_GEMINI && !p->setup_done) return;   /* not until setupComplete */
 
     /* channel-rate L16 -> wire-rate L16 (no-op when the rates match) */
     if (p->rs_out) {
@@ -370,6 +401,31 @@ void es_proto_send_audio(es_proto_ctx_t *p, es_ws_t *ws, const int16_t *pcm, siz
     /* native + deepgram + vapi: raw codec-coded binary frame */
     nb = es_encode(p->codec, pcm, nsamples, enc);
     if (nb != (size_t) -1) es_ws_send_binary(ws, enc, nb);
+}
+
+/* Called for every frame of caller audio, sent or withheld (`pause`, a masking window).
+ * Deepgram's Voice Agent closes a connection that goes silent (CLIENT_MESSAGE_TIMEOUT) and
+ * asks for one KeepAlive every 8 seconds while no audio is being sent, and none while it
+ * is. Other vendors need nothing here: the transport's WebSocket pings cover them. */
+#define ES_DEEPGRAM_KEEPALIVE_MS 8000
+void es_proto_tick(es_proto_ctx_t *p, es_ws_t *ws, long now_ms, int audio_sent)
+{
+    if (!p || !ws || p->kind != ES_PROTO_DEEPGRAM) return;
+    if (audio_sent || !p->last_tx_ms) { p->last_tx_ms = now_ms; return; }
+    if (now_ms - p->last_tx_ms >= ES_DEEPGRAM_KEEPALIVE_MS) {
+        es_send_text_z(ws, "{\"type\":\"KeepAlive\"}");
+        p->last_tx_ms = now_ms;
+    }
+}
+
+/* ElevenLabs names an audio format as "pcm_16000" or "ulaw_8000". Returns 1 and fills
+ * codec and rate when `s` is one of those shapes. */
+static int es_elevenlabs_fmt(const char *s, es_codec_t *codec, long *rate)
+{
+    if (!s) return 0;
+    if (!strncasecmp(s, "pcm_", 4))  { *codec = ES_CODEC_L16;  *rate = atol(s + 4); return *rate > 0; }
+    if (!strncasecmp(s, "ulaw_", 5)) { *codec = ES_CODEC_PCMU; *rate = atol(s + 5); return *rate > 0; }
+    return 0;
 }
 
 /* ---- inbound (agent -> caller) ------------------------------------------ */
@@ -503,7 +559,8 @@ static void es_dispatch_command(es_proto_ctx_t *p, cJSON *root, const es_proto_s
         const char *cx = es_json_str(root, "context");
         int n;
         if (!es_cmd_token_ok(to))        ES_CMD_BLOCK("rejected: transfer destination");
-        if (!es_cmd_dialplan_ok(dp))     ES_CMD_BLOCK("rejected: transfer dialplan"); /* blocks the `inline` app-exec */
+        if (!es_cmd_dialplan_allowed(p->dialplan_allow, dp))
+            ES_CMD_BLOCK("rejected: transfer dialplan (only XML, or one named in dialplans=)");
         if (*cx && !es_cmd_token_ok(cx)) ES_CMD_BLOCK("rejected: transfer context");
         n = snprintf(arg, sizeof arg, "%s %s", uuid, to);
         if (n < 0 || n >= (int) sizeof arg) n = (int) sizeof arg - 1;   /* clamp against oversized fields */
@@ -525,6 +582,8 @@ static void es_dispatch_command(es_proto_ctx_t *p, cJSON *root, const es_proto_s
         const char *file = es_json_str(root, "file");
         const char *leg  = es_json_str(root, "leg");
         if (!es_cmd_token_ok(file)) ES_CMD_BLOCK("rejected: play file (app-exec/empty)");
+        if (!es_cmd_media_ok(p->media_schemes, file))
+            ES_CMD_BLOCK("rejected: play file (stream scheme not in media_schemes=)");
         if (!es_cmd_leg_ok(leg))    ES_CMD_BLOCK("rejected: play leg");
         snprintf(api, sizeof api, "uuid_broadcast");
         snprintf(arg, sizeof arg, "%s %s %s", uuid, file, *leg ? leg : "aleg");
@@ -537,8 +596,17 @@ static void es_dispatch_command(es_proto_ctx_t *p, cJSON *root, const es_proto_s
         if (*state && strcasecmp(state, "start") && strcasecmp(state, "stop") &&
             strcasecmp(state, "mask") && strcasecmp(state, "unmask")) ES_CMD_BLOCK("rejected: record state");
         if (!es_cmd_recpath_ok(file)) ES_CMD_BLOCK("rejected: record path (app-exec/traversal)");
+        if (!es_cmd_record_ok(p->record_dirs, p->media_schemes, file))
+            ES_CMD_BLOCK("rejected: record path (absolute path outside record_dir=, or a stream scheme not in media_schemes=)");
         snprintf(api, sizeof api, "uuid_record");
-        snprintf(arg, sizeof arg, "%s %s %s", uuid, *state ? state : "start", file);
+        /* A relative path is written under the recordings directory, on start and on stop
+         * alike (FreeSWITCH matches a stop against the full path). "all" is uuid_record's
+         * own word for every recording on the channel, not a file. */
+        if (p->record_base && file[0] != '/' && !strstr(file, "://") &&
+            !(!strcasecmp(state, "stop") && !strcasecmp(file, "all")))
+            snprintf(arg, sizeof arg, "%s %s %s/%s", uuid, *state ? state : "start", p->record_base, file);
+        else
+            snprintf(arg, sizeof arg, "%s %s %s", uuid, *state ? state : "start", file);
     } else if (!strcasecmp(action, "setvar")) {
         const char *name  = es_json_str(root, "name");
         const char *value = es_json_str(root, "value");
@@ -684,7 +752,37 @@ void es_proto_on_text(es_proto_ctx_t *p, const char *data, size_t len, const es_
         if (!strcmp(e, "audio")) {
             cJSON *ae = cJSON_GetObjectItem(root, "audio_event");
             cJSON *b  = ae ? cJSON_GetObjectItem(ae, "audio_base_64") : NULL;
-            if (b && b->valuestring) es_deliver_ulaw_b64(p, b->valuestring, p->codec, sink);   /* ulaw_8000 */
+            if (b && b->valuestring && !p->rs_in_failed)
+                es_deliver_ulaw_b64(p, b->valuestring, p->in_codec, sink);
+        } else if (!strcmp(e, "conversation_initiation_metadata")) {
+            /* The agent says, once per connection, which formats it speaks and expects; they
+             * are set on the agent at ElevenLabs, not by this stream. Its own audio is played
+             * in the format it names, whatever codec= and rate= said: assuming mu-law for an
+             * agent that sends pcm_16000 played noise. What it expects from the caller cannot
+             * be changed here in mid-call, so a mismatch is reported with the options that fix it. */
+            cJSON *md = cJSON_GetObjectItem(root, "conversation_initiation_metadata_event");
+            cJSON *fo = md ? cJSON_GetObjectItem(md, "agent_output_audio_format") : NULL;
+            cJSON *fi = md ? cJSON_GetObjectItem(md, "user_input_audio_format") : NULL;
+            es_codec_t c; long hz;
+            if (fo && es_elevenlabs_fmt(fo->valuestring, &c, &hz)) {
+                if (es_agent_rate(p, hz)) p->in_codec = c;
+                else p->rs_in_failed = 1;              /* a rate that cannot be played is not played as another */
+            } else if (fo && fo->valuestring && !p->bad_rate_warned) {
+                p->bad_rate_warned = 1;
+                p->rs_in_failed = 1;                   /* a format that cannot be decoded is not played */
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                    "earshot: the ElevenLabs agent sends audio as '%s', which is not supported; "
+                    "set its output format to ulaw_8000 or pcm_16000\n", fo->valuestring);
+            }
+            if (fi && es_elevenlabs_fmt(fi->valuestring, &c, &hz) &&
+                (c != p->codec || hz != p->rate) && !p->fmt_warned) {
+                p->fmt_warned = 1;
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                    "earshot: the ElevenLabs agent expects caller audio as '%s' but this stream sends %s at %d Hz; "
+                    "it will not understand the caller. Start the stream with codec=%s rate=%ld\n",
+                    fi->valuestring, p->codec == ES_CODEC_L16 ? "pcm" : "ulaw", p->rate,
+                    c == ES_CODEC_L16 ? "l16" : "pcmu", hz);
+            }
         } else if (!strcmp(e, "interruption")) {
             if (sink->on_clear) sink->on_clear(sink->user);    /* barge-in */
         } else if (!strcmp(e, "ping")) {                       /* keepalive: must pong back */
@@ -702,6 +800,10 @@ void es_proto_on_text(es_proto_ctx_t *p, const char *data, size_t len, const es_
 
     if (p->kind == ES_PROTO_GEMINI) {
         cJSON *sc = cJSON_GetObjectItem(root, "serverContent");
+        if (cJSON_GetObjectItem(root, "setupComplete")) p->setup_done = 1;   /* caller audio may flow */
+        if (cJSON_GetObjectItem(root, "goAway"))
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                "earshot: Gemini announced it will close this session soon (goAway); the stream reconnects with a new session\n");
         if (sc) {
             cJSON *interrupted = cJSON_GetObjectItem(sc, "interrupted");
             cJSON *mt = cJSON_GetObjectItem(sc, "modelTurn");

@@ -40,9 +40,14 @@ at it — but the module still treats agent input defensively:
   output can be steered by spoken prompt-injection, treat an injection that reaches this channel as part
   of your threat model. Notes: **`setvar` is fail-closed** — a name denylist cannot secure it (identifier-clean
   variables such as `transfer_after_bridge` reach the `inline` dialplan, i.e. RCE, through their *value*), so
-  only variable names you list in `setvars=<name,...>` are settable, and none are settable by default. `record`
-  paths are validated (no `::`, `..`, whitespace) but are **not confined to a base directory**, so a granted
-  `record` still permits an attacker-chosen absolute write path — don't grant `record` to untrusted agents.
+  only variable names you list in `setvars=<name,...>` are settable, and none are settable by default. The other
+  arguments an agent supplies are allowlisted too. `transfer` may name only the `XML` dialplan unless
+  `dialplans=<name,...>` lists another (`inline` never). `record` takes a relative path, which the module writes
+  under FreeSWITCH's recordings directory (left to FreeSWITCH it would land among the prompts it plays), or an absolute path under a directory listed in `record_dir=<dir,...>`;
+  with none listed, absolute paths are refused. `play` and `record` refuse `http://`, `shout://` and every
+  other stream scheme unless `media_schemes=<scheme,...>` lists it (`tone_stream`, `silence_stream` and
+  `local_stream` are always allowed for `play`), so an agent cannot make FreeSWITCH fetch a URL of its
+  choosing or send a recording off the box.
   Media arguments cannot contain `::`, which also rejects IPv6-literal URLs (`http://[2001:db8::1]/x.wav`).
 - **PCI/PII masking** (`mask on`) mutes caller audio and redacts DTMF to the agent; the digit value is
   never placed in the `earshot::dtmf` audit event during a masking window.
