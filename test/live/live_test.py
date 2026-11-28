@@ -929,6 +929,123 @@ async def s_twilio(rig):
     await rig.settle()
 
 
+async def s_adapters(rig):
+    """Vendor dialects against stand-in servers: ElevenLabs, Gemini, Deepgram, Twilio's numbering."""
+    esl, agent = rig.esl, rig.agent
+
+    def tone_b64(ms, rate):
+        pcm, _ = tone(AGENT_HZ, ms, rate=rate)
+        return base64.b64encode(pcm).decode()
+
+    # ElevenLabs: the agent is set to 16 kHz PCM; the stream is started with the defaults.
+    async def eleven(conn):
+        await conn.ws.send(json.dumps({"type": "conversation_initiation_metadata",
+                                       "conversation_initiation_metadata_event": {
+                                           "conversation_id": "conv_rig", "agent_output_audio_format": "pcm_16000",
+                                           "user_input_audio_format": "pcm_16000"}}))
+        await asyncio.sleep(0.3)
+        for i in range(25):                                   # 2.5 s, 100 ms a message, ahead of real time
+            await conn.ws.send(json.dumps({"type": "audio", "audio_event": {"audio_base_64": tone_b64(100, 16000),
+                                                                           "event_id": i + 1}}))
+            await asyncio.sleep(0.08)
+        await conn.ws.send(json.dumps({"type": "ping", "ping_event": {"event_id": 77}}))
+
+    agent.on("/eleven", eleven)
+    a, b, rec = await rig.call(record=True)
+    await esl.api(f"earshot {b} start {url('/eleven')} proto=elevenlabs")
+    conn = await agent.wait_conn("/eleven")
+    if rig.check("[elevenlabs] the agent is connected", conn is not None):
+        await asyncio.sleep(4)
+        await esl.api(f"uuid_record {a} stop {rec}")
+        ms = heard_agent(rec)
+        rig.check("[elevenlabs] an agent that announces pcm_16000 is heard as its 440 Hz tone, not as noise",
+                  2000 <= ms <= 3000, f"{ms} ms of tone")
+        rig.check("[elevenlabs] the caller's audio arrives as user_audio_chunk messages",
+                  len([m for _, m in conn.texts if isinstance(m, dict) and "user_audio_chunk" in m]) > 100)
+        rig.check("[elevenlabs] the agent's ping is answered with a pong for the same event",
+                  await conn.wait_text(2, type="pong", event_id=77) is not None)
+        log = open(FS_LOG, errors="replace").read()
+        rig.check("[elevenlabs] the log says the agent expects another caller-audio format, and how to fix it",
+                  "expects caller audio as 'pcm_16000'" in log and "codec=l16 rate=16000" in log)
+    await rig.hangup(a, b)
+
+    # Gemini: the server takes its time over setupComplete.
+    async def gemini(conn):
+        await asyncio.sleep(1.5)
+        conn.setup_sent = time.monotonic()
+        await conn.ws.send(json.dumps({"setupComplete": {}}).encode())     # Gemini sends JSON in binary frames
+        await asyncio.sleep(0.3)
+        for _ in range(20):
+            msg = {"serverContent": {"modelTurn": {"parts": [
+                {"inlineData": {"mimeType": "audio/pcm;rate=24000", "data": tone_b64(100, 24000)}}]}}}
+            await conn.ws.send(json.dumps(msg).encode())
+            await asyncio.sleep(0.08)
+
+    agent.on("/gemini", gemini)
+    a, b, rec = await rig.call(record=True)
+    await esl.api(f"earshot {b} start {url('/gemini')} proto=gemini")
+    conn = await agent.wait_conn("/gemini")
+    if rig.check("[gemini] the agent is connected", conn is not None):
+        await asyncio.sleep(4.5)
+        await esl.api(f"uuid_record {a} stop {rec}")
+        first = conn.texts[0][1] if conn.texts else {}
+        rig.check("[gemini] the first message is setup, naming the current Live model",
+                  isinstance(first, dict) and first.get("setup", {}).get("model") == "models/gemini-3.8-live", str(first)[:120])
+        audio = [t for t, m in conn.texts if isinstance(m, dict) and "realtimeInput" in m]
+        rig.check("[gemini] no caller audio is sent before setupComplete, and it flows after",
+                  len(audio) > 50 and audio[0] >= conn.setup_sent, f"{len(audio)} messages, first "
+                  f"{(audio[0] - conn.setup_sent) if audio else 0:+.2f}s from setupComplete")
+        ms = heard_agent(rec)
+        rig.check("[gemini] the 24 kHz reply is heard by the caller as its 440 Hz tone", 1500 <= ms <= 2500, f"{ms} ms")
+    await rig.hangup(a, b)
+
+    # Deepgram: a pause must not let the session go silent.
+    a, b, _ = await rig.call()
+    await esl.api(f"earshot {b} start {url('/deepgram')} proto=deepgram")
+    conn = await agent.wait_conn("/deepgram")
+    if rig.check("[deepgram] the agent is connected", conn is not None):
+        await asyncio.sleep(1)
+        first = conn.texts[0][1] if conn.texts else {}
+        rig.check("[deepgram] the first message is Settings", isinstance(first, dict) and first.get("type") == "Settings")
+        rig.check("[deepgram] with audio flowing there is no KeepAlive", not conn.json_texts(type="KeepAlive"))
+        await esl.api(f"earshot {b} pause")
+        await asyncio.sleep(17.5)
+        n = len(conn.json_texts(type="KeepAlive"))
+        rig.check("[deepgram] paused for 17.5 s, the agent received two KeepAlives (one every 8 s)", n == 2, f"{n}")
+        await esl.api(f"earshot {b} resume")
+        await asyncio.sleep(9)
+        n = len(conn.json_texts(type="KeepAlive"))
+        rig.check("[deepgram] and none once audio flows again", n == 2 and not conn.closed.is_set(), f"{n}")
+    await rig.hangup(a, b)
+
+    # Twilio: every message Twilio numbers is numbered, in order.
+    async def twilio(conn):
+        await asyncio.sleep(0.5)
+        pcm, _ = tone(AGENT_HZ, 200)
+        await conn.ws.send(json.dumps({"event": "media", "streamSid": "x",
+                                       "media": {"payload": base64.b64encode(audioop.lin2ulaw(pcm, 2)).decode()}}))
+        await conn.ws.send(json.dumps({"event": "mark", "streamSid": "x", "mark": {"name": "rig-mark"}}))
+
+    agent.on("/twilio-seq", twilio)
+    a, b, _ = await rig.call()
+    await esl.api(f"earshot {b} start {url('/twilio-seq')} proto=twilio dtmf=on")
+    conn = await agent.wait_conn("/twilio-seq")
+    if rig.check("[twilio] the agent is connected", conn is not None):
+        await asyncio.sleep(1.2)
+        await esl.api(f"uuid_send_dtmf {a} 7")
+        await asyncio.sleep(1)
+        mark = conn.json_texts(event="mark")
+        dtmf = conn.json_texts(event="dtmf")
+        rig.check("[twilio] the mark is echoed once its audio has played, with a sequenceNumber",
+                  len(mark) == 1 and mark[0].get("mark", {}).get("name") == "rig-mark" and "sequenceNumber" in mark[0], str(mark)[:160])
+        rig.check("[twilio] the caller's digit arrives as dtmf on the inbound track, with a sequenceNumber",
+                  len(dtmf) == 1 and dtmf[0].get("dtmf") == {"track": "inbound", "digit": "7"} and "sequenceNumber" in dtmf[0], str(dtmf)[:160])
+        seqs = [int(m["sequenceNumber"]) for _, m in conn.texts if isinstance(m, dict) and "sequenceNumber" in m]
+        rig.check("[twilio] sequence numbers run 1, 2, 3, ... with no gap or repeat across media, mark and dtmf",
+                  seqs == list(range(1, len(seqs) + 1)) and len(seqs) > 50, f"{len(seqs)} numbered messages")
+    await rig.settle()
+
+
 async def s_app(rig):
     """The stream started from the dialplan application instead of the API."""
     esl, agent = rig.esl, rig.agent
@@ -1061,7 +1178,7 @@ async def s_unload(rig):
 SCENARIOS = [
     ("basic", s_basic), ("hangup", s_hangup), ("stop_mid_playback", s_stop_mid_playback),
     ("commands", s_commands), ("unreachable", s_unreachable), ("reconnect", s_reconnect),
-    ("liveness", s_liveness), ("twilio", s_twilio), ("app", s_app), ("pause_fanout", s_pause_fanout),
+    ("liveness", s_liveness), ("twilio", s_twilio), ("adapters", s_adapters), ("app", s_app), ("pause_fanout", s_pause_fanout),
     ("verb_race", s_verb_race), ("agent_race", s_agent_race), ("churn", s_churn), ("unload", s_unload),
 ]
 

@@ -34,6 +34,10 @@ struct es_proto_ctx {
     uint64_t        out_seq;    /* Twilio sequenceNumber */
     uint64_t        out_chunk;  /* Twilio media chunk */
     uint64_t        out_ts;     /* cumulative media timestamp (ms) */
+    volatile int    setup_done; /* gemini: the server answered `setup` with setupComplete; audio waits for it */
+    es_codec_t      in_codec;   /* elevenlabs: the format the agent said its audio is in */
+    int             fmt_warned; /* elevenlabs: a mismatch of the caller-audio format was already logged */
+    long            last_tx_ms; /* deepgram: when caller audio or a KeepAlive last went out */
     uint8_t         agg[8192];  /* assemblyai: coalesce ~20ms frames into >=50ms chunks (AAI err 3007) */
     size_t          agg_len;
 };
@@ -151,6 +155,7 @@ es_proto_ctx_t *es_proto_create(es_proto_kind_t kind, es_codec_t codec,
     if (!p) return NULL;
     p->kind      = kind;
     p->codec     = codec;
+    p->in_codec  = codec;
     p->rate      = wire_rate > 0 ? wire_rate : 8000;
     p->rate_out  = p->rate;
     p->chan_rate = chan_rate > 0 ? chan_rate : 8000;
@@ -251,11 +256,17 @@ void es_proto_send_start(es_proto_ctx_t *p, es_ws_t *ws)
     }
 
     if (p->kind == ES_PROTO_GEMINI) {                 /* setup must be the first message */
+        /* Nothing else may be sent until the server answers with setupComplete (the API
+         * reference: "Clients should wait ... before sending any additional messages"), on
+         * every connection, so a reconnect waits again. */
+        p->setup_done = 0;
         if (p->cfg) { es_send_text_z(ws, p->cfg); return; }
-        /* Live model names churn fast; the "…-latest" alias is the most stable default. Operators
-         * normally supply model/voice/system-prompt via EARSHOT_SESSION_CONFIG (sent verbatim above). */
+        /* The stable Live model at the time of writing. There is no "-latest" alias for a
+         * Live model, and the 2.5 native-audio names this default used before are previews
+         * that get retired, so operators should name their model, voice and system prompt in
+         * EARSHOT_SESSION_CONFIG (sent verbatim above) rather than rely on this. */
         es_send_text_z(ws,
-            "{\"setup\":{\"model\":\"models/gemini-2.5-flash-native-audio-latest\","
+            "{\"setup\":{\"model\":\"models/gemini-3.8-live\","
             "\"generationConfig\":{\"responseModalities\":[\"AUDIO\"]}}}");
         return;
     }
@@ -284,8 +295,8 @@ void es_proto_send_mark(es_proto_ctx_t *p, es_ws_t *ws, const char *name)
     char msg[256];
     if (!p || !ws || p->kind != ES_PROTO_TWILIO || !name) return;
     snprintf(msg, sizeof msg,
-        "{\"event\":\"mark\",\"streamSid\":\"%s\",\"mark\":{\"name\":\"%s\"}}",
-        p->stream_sid, name);
+        "{\"event\":\"mark\",\"sequenceNumber\":\"%llu\",\"streamSid\":\"%s\",\"mark\":{\"name\":\"%s\"}}",
+        (unsigned long long)++p->out_seq, p->stream_sid, name);
     es_send_text_z(ws, msg);
 }
 
@@ -295,8 +306,9 @@ void es_proto_send_dtmf(es_proto_ctx_t *p, es_ws_t *ws, const char *digit)
     if (!p || !ws || !digit) return;
     if (p->kind == ES_PROTO_TWILIO)
         snprintf(msg, sizeof msg,
-                 "{\"event\":\"dtmf\",\"streamSid\":\"%s\",\"dtmf\":{\"track\":\"inbound\",\"digit\":\"%s\"}}",
-                 p->stream_sid, digit);
+                 "{\"event\":\"dtmf\",\"streamSid\":\"%s\",\"sequenceNumber\":\"%llu\","
+                 "\"dtmf\":{\"track\":\"inbound\",\"digit\":\"%s\"}}",
+                 p->stream_sid, (unsigned long long)++p->out_seq, digit);
     else
         snprintf(msg, sizeof msg, "{\"type\":\"dtmf\",\"digit\":\"%s\"}", digit);
     es_send_text_z(ws, msg);
@@ -308,6 +320,7 @@ void es_proto_send_audio(es_proto_ctx_t *p, es_ws_t *ws, const int16_t *pcm, siz
     uint8_t enc[SWITCH_RECOMMENDED_BUFFER_SIZE];
     size_t  nb;
     if (!p || !ws || !pcm || !nsamples) return;
+    if (p->kind == ES_PROTO_GEMINI && !p->setup_done) return;   /* not until setupComplete */
 
     /* channel-rate L16 -> wire-rate L16 (no-op when the rates match) */
     if (p->rs_out) {
@@ -388,6 +401,31 @@ void es_proto_send_audio(es_proto_ctx_t *p, es_ws_t *ws, const int16_t *pcm, siz
     /* native + deepgram + vapi: raw codec-coded binary frame */
     nb = es_encode(p->codec, pcm, nsamples, enc);
     if (nb != (size_t) -1) es_ws_send_binary(ws, enc, nb);
+}
+
+/* Called for every frame of caller audio, sent or withheld (`pause`, a masking window).
+ * Deepgram's Voice Agent closes a connection that goes silent (CLIENT_MESSAGE_TIMEOUT) and
+ * asks for one KeepAlive every 8 seconds while no audio is being sent, and none while it
+ * is. Other vendors need nothing here: the transport's WebSocket pings cover them. */
+#define ES_DEEPGRAM_KEEPALIVE_MS 8000
+void es_proto_tick(es_proto_ctx_t *p, es_ws_t *ws, long now_ms, int audio_sent)
+{
+    if (!p || !ws || p->kind != ES_PROTO_DEEPGRAM) return;
+    if (audio_sent || !p->last_tx_ms) { p->last_tx_ms = now_ms; return; }
+    if (now_ms - p->last_tx_ms >= ES_DEEPGRAM_KEEPALIVE_MS) {
+        es_send_text_z(ws, "{\"type\":\"KeepAlive\"}");
+        p->last_tx_ms = now_ms;
+    }
+}
+
+/* ElevenLabs names an audio format as "pcm_16000" or "ulaw_8000". Returns 1 and fills
+ * codec and rate when `s` is one of those shapes. */
+static int es_elevenlabs_fmt(const char *s, es_codec_t *codec, long *rate)
+{
+    if (!s) return 0;
+    if (!strncasecmp(s, "pcm_", 4))  { *codec = ES_CODEC_L16;  *rate = atol(s + 4); return *rate > 0; }
+    if (!strncasecmp(s, "ulaw_", 5)) { *codec = ES_CODEC_PCMU; *rate = atol(s + 5); return *rate > 0; }
+    return 0;
 }
 
 /* ---- inbound (agent -> caller) ------------------------------------------ */
@@ -714,7 +752,37 @@ void es_proto_on_text(es_proto_ctx_t *p, const char *data, size_t len, const es_
         if (!strcmp(e, "audio")) {
             cJSON *ae = cJSON_GetObjectItem(root, "audio_event");
             cJSON *b  = ae ? cJSON_GetObjectItem(ae, "audio_base_64") : NULL;
-            if (b && b->valuestring) es_deliver_ulaw_b64(p, b->valuestring, p->codec, sink);   /* ulaw_8000 */
+            if (b && b->valuestring && !p->rs_in_failed)
+                es_deliver_ulaw_b64(p, b->valuestring, p->in_codec, sink);
+        } else if (!strcmp(e, "conversation_initiation_metadata")) {
+            /* The agent says, once per connection, which formats it speaks and expects; they
+             * are set on the agent at ElevenLabs, not by this stream. Its own audio is played
+             * in the format it names, whatever codec= and rate= said: assuming mu-law for an
+             * agent that sends pcm_16000 played noise. What it expects from the caller cannot
+             * be changed here in mid-call, so a mismatch is reported with the options that fix it. */
+            cJSON *md = cJSON_GetObjectItem(root, "conversation_initiation_metadata_event");
+            cJSON *fo = md ? cJSON_GetObjectItem(md, "agent_output_audio_format") : NULL;
+            cJSON *fi = md ? cJSON_GetObjectItem(md, "user_input_audio_format") : NULL;
+            es_codec_t c; long hz;
+            if (fo && es_elevenlabs_fmt(fo->valuestring, &c, &hz)) {
+                if (es_agent_rate(p, hz)) p->in_codec = c;
+                else p->rs_in_failed = 1;              /* a rate that cannot be played is not played as another */
+            } else if (fo && fo->valuestring && !p->bad_rate_warned) {
+                p->bad_rate_warned = 1;
+                p->rs_in_failed = 1;                   /* a format that cannot be decoded is not played */
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                    "earshot: the ElevenLabs agent sends audio as '%s', which is not supported; "
+                    "set its output format to ulaw_8000 or pcm_16000\n", fo->valuestring);
+            }
+            if (fi && es_elevenlabs_fmt(fi->valuestring, &c, &hz) &&
+                (c != p->codec || hz != p->rate) && !p->fmt_warned) {
+                p->fmt_warned = 1;
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                    "earshot: the ElevenLabs agent expects caller audio as '%s' but this stream sends %s at %d Hz; "
+                    "it will not understand the caller. Start the stream with codec=%s rate=%ld\n",
+                    fi->valuestring, p->codec == ES_CODEC_L16 ? "pcm" : "ulaw", p->rate,
+                    c == ES_CODEC_L16 ? "l16" : "pcmu", hz);
+            }
         } else if (!strcmp(e, "interruption")) {
             if (sink->on_clear) sink->on_clear(sink->user);    /* barge-in */
         } else if (!strcmp(e, "ping")) {                       /* keepalive: must pong back */
@@ -732,6 +800,10 @@ void es_proto_on_text(es_proto_ctx_t *p, const char *data, size_t len, const es_
 
     if (p->kind == ES_PROTO_GEMINI) {
         cJSON *sc = cJSON_GetObjectItem(root, "serverContent");
+        if (cJSON_GetObjectItem(root, "setupComplete")) p->setup_done = 1;   /* caller audio may flow */
+        if (cJSON_GetObjectItem(root, "goAway"))
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                "earshot: Gemini announced it will close this session soon (goAway); the stream reconnects with a new session\n");
         if (sc) {
             cJSON *interrupted = cJSON_GetObjectItem(sc, "interrupted");
             cJSON *mt = cJSON_GetObjectItem(sc, "modelTurn");

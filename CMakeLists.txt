@@ -61,6 +61,17 @@ if(EARSHOT_TESTS)
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   add_test(NAME proto_audio COMMAND test_proto_audio)
 
+  # What each vendor adapter sends and how it reads the vendor's replies (Twilio sequence
+  # numbers, Gemini's setup wait, ElevenLabs' announced format, Deepgram's KeepAlive).
+  add_executable(test_adapters
+    test/test_adapters.c
+    test/support/command_dispatch_stubs.c
+    src/es_proto.c src/es_cmdguard.c src/es_codec.c src/es_pb.c)
+  target_include_directories(test_adapters PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/support
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  add_test(NAME adapters COMMAND test_adapters)
+
   # The WebSocket transport on a context with one stream and no traffic: teardown and
   # reconnect must not depend on other streams' socket events. Needs libwebsockets (an
   # in-process loopback server plays the agent); skipped where it is not installed.

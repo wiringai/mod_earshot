@@ -35,6 +35,7 @@ libwebsockets (4.1.6 on Debian 12).
 | `reconnect` | The agent drops the connection; the stream returns, says `reconnected`, and carries no backlog |
 | `liveness` | A silent agent is dropped after `liveness=`; one that only answers pings is kept |
 | `twilio` | `connected`, `start`, `media`, then `stop` as the last message before the close |
+| `adapters` | ElevenLabs audio in the format the agent announces, Gemini's wait for `setupComplete`, Deepgram's KeepAlive through a pause, Twilio's message numbering |
 | `app` | The dialplan application, not only the API |
 | `pause_fanout` | `pause` and `resume`, and two streams on one call |
 | `verb_race` | 60 rounds of operator commands and caller digits racing a stop or a hangup |
@@ -48,6 +49,7 @@ channel is left.
 ## What it does not cover
 
 - TLS (`wss://`) and client certificates: see `test/mtls`.
-- Real vendor endpoints. The agent here speaks the native and Twilio dialects only.
+- Real vendor endpoints. The agent here is a stand-in that speaks each dialect as the vendor documents it;
+  it proves the module's side, not that the vendor still behaves as documented.
 - Load. Ten calls at a time is a race test, not a capacity figure.
 - Other FreeSWITCH or libwebsockets versions than the image's.

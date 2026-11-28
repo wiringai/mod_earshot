@@ -49,6 +49,21 @@ All notable changes to Earshot (`mod_earshot`). Format follows
   `earshot::command` audit said `ok:true`. Both now say `ok:false` with the reason in `error`.
 
 ### Fixed
+- **ElevenLabs: the agent's audio is played in the format the agent announces.** The audio
+  format is a setting of the agent at ElevenLabs, sent in `conversation_initiation_metadata`;
+  the adapter ignored it and decoded with the stream's `codec=`/`rate=`, so an agent set to
+  `pcm_16000` behind a stream started with the defaults played as noise. Output now follows
+  the announcement (`pcm_<rate>` or `ulaw_8000`). The format the agent expects from the
+  caller cannot be changed in mid-call: a mismatch is logged once, with the `codec=` and
+  `rate=` that fix it.
+- **Gemini Live: caller audio waits for `setupComplete`**, as the API requires, on every
+  connection. The default model is now `models/gemini-3.8-live`; the old default used a
+  `-latest` alias that no Live model has. Name your model in `EARSHOT_SESSION_CONFIG`.
+- **Deepgram Voice Agent: a paused or masked stream is kept alive.** With no audio going out,
+  Deepgram closes the session (`CLIENT_MESSAGE_TIMEOUT`). The adapter now sends
+  `{"type":"KeepAlive"}` every 8 seconds while audio is withheld, and none while it flows.
+- **Twilio dialect: the echoed `mark` and the `dtmf` message carry a `sequenceNumber`**, in
+  step with `start`, `media` and `stop`, as Twilio's do.
 - **A stream that stops now closes its WebSocket properly.** Stopping used to cut the
   connection: the agent saw an abnormal close (1006) on every call end, and a message queued
   just before the stop, such as the Twilio dialect's `stop`, was never sent. What is queued is

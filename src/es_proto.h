@@ -118,6 +118,9 @@ void            es_proto_set_record_base(es_proto_ctx_t *p, const char *dir);
 
 /* Lifecycle preamble/postamble (Twilio connected+start / stop; no-op for native). */
 void es_proto_send_start(es_proto_ctx_t *p, es_ws_t *ws);
+/* Call once per frame of caller audio, sent (audio_sent=1) or withheld by pause or a masking
+ * window (0), with a monotonic clock in ms: lets an adapter keep an idle session alive. */
+void es_proto_tick(es_proto_ctx_t *p, es_ws_t *ws, long now_ms, int audio_sent);
 void es_proto_send_stop (es_proto_ctx_t *p, es_ws_t *ws);
 
 /* Outbound caller audio (L16) -> wire (native binary / Twilio media JSON). */

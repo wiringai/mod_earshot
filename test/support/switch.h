@@ -32,6 +32,9 @@ extern int stub_log_lines;
 void switch_log_printf(int channel, int level, const char *fmt, ...);
 /* the last agent rate a resampler was built for, and how many were built */
 extern int stub_resample_creates, stub_resample_from;
+/* set by a test to see what the adapter sends */
+extern void (*stub_on_send_text)(const char *d, size_t l);
+extern void (*stub_on_send_binary)(const void *d, size_t l);
 
 typedef int switch_bool_t;
 typedef unsigned long switch_size_t;

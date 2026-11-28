@@ -1032,11 +1032,16 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
         if (switch_core_media_bug_read(bug, &frame, SWITCH_FALSE) == SWITCH_STATUS_SUCCESS && frame.datalen) {
             /* masking window (PCI): don't leak caller audio to the agent; `pause`: nothing
              * leaves the box until `resume` (mod_audio_stream semantics) */
-            if (st->ws && es_ws_connected(st->ws) && !ES_LOAD(st->masking) && !ES_LOAD(st->paused)) {
-                /* the proto adapter frames it (native binary / twilio media JSON) */
-                es_proto_send_audio(st->proto_ctx, st->ws, (const int16_t *) frame.data, frame.datalen / 2);
-                st->tx_frames++;
-                st->tx_bytes += frame.datalen;
+            if (st->ws && es_ws_connected(st->ws)) {
+                int sending = !ES_LOAD(st->masking) && !ES_LOAD(st->paused);
+                if (sending) {
+                    /* the proto adapter frames it (native binary / twilio media JSON) */
+                    es_proto_send_audio(st->proto_ctx, st->ws, (const int16_t *) frame.data, frame.datalen / 2);
+                    st->tx_frames++;
+                    st->tx_bytes += frame.datalen;
+                }
+                /* a vendor that drops a silent connection is kept alive through a pause or mask */
+                es_proto_tick(st->proto_ctx, st->ws, (long) (switch_micro_time_now() / 1000), sending);
             }
             /* module-side turn detection on the caller audio (independent of the agent) */
             if (st->vad) {

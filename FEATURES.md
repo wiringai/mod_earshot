@@ -69,8 +69,11 @@ base64, and the session handshake.
 - Twilio **marks echo at their position** in the audio, in order (agents that wait on marks work; marks
   on audio discarded by a clear are echoed at once, as Twilio does).
 - OpenAI negotiates the `realtime` WebSocket subprotocol automatically (auth via `EARSHOT_AUTH`).
-- ElevenLabs' `ping` keepalive is answered with `pong` automatically (no dropped sessions).
-- Gemini's asymmetric rates (16 kHz in / 24 kHz out) are resampled transparently to the channel.
+- ElevenLabs' `ping` keepalive is answered with `pong` automatically (no dropped sessions), and its
+  audio is played in the format the agent announces at connect (`pcm_<rate>` or `ulaw_8000`).
+- Gemini's asymmetric rates (16 kHz in / 24 kHz out) are resampled transparently to the channel; caller
+  audio is held until the server's `setupComplete`.
+- Deepgram's Voice Agent is sent a `KeepAlive` every 8 seconds while a stream is paused or masked.
 - Pipecat frames are hand-encoded protobuf — the codec is a pure-C unit (`es_pb`) with its own tests.
 - `openai`/`deepgram`/`gemini`/`elevenlabs` session config (voice/model/keys/prompt) defaults to an
   audio-format handshake, or supply a full JSON via the `EARSHOT_SESSION_CONFIG` channel variable.

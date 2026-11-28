@@ -142,13 +142,20 @@ Full framing details in [FEATURES.md](../FEATURES.md#2-protocol-adapters--); in 
 - **`native`** — raw binary frames + `{"type":"playAudio"|"clear"}` JSON control.
 - **`twilio`** — Twilio Media Streams (`connected`/`start`/`media`/`mark`, base64 µ-law, mark echo).
 - **`openai`** — OpenAI Realtime (`session.update`, `input_audio_buffer.append`, `response.output_audio.delta`; `realtime` subprotocol, auth via `EARSHOT_AUTH`).
-- **`deepgram`** — Deepgram Voice Agent (`Settings`, raw binary audio, `UserStartedSpeaking`).
+- **`deepgram`** — Deepgram Voice Agent (`Settings`, raw binary audio, `UserStartedSpeaking`); a `KeepAlive` every
+  8 seconds while the stream is paused or masked, so the session survives it).
 - **`vapi`** — Vapi WebSocket transport (raw binary audio, `speech-update`/`user-interrupted` control). The
   operator does a REST `POST /call` with `transport.provider="vapi.websocket"` and passes the returned
   per-call `websocketCallUrl` as the `start` url; match `codec=`/`rate=` to the call's `audioFormat`
   (e.g. `codec=l16 rate=16000` ↔ `pcm_s16le`/16000, or `codec=pcmu rate=8000` ↔ `mulaw`/8000).
 - **`elevenlabs`** — ElevenLabs Conversational AI (`user_audio_chunk` / `{type:audio}`, auto `ping`→`pong`).
-- **`gemini`** — Gemini Live (`setup`, `realtimeInput.mediaChunks` 16k / `serverContent` 24k; resampled).
+  The audio formats are settings of the agent at ElevenLabs. Its output is played in whatever
+  format it announces (`pcm_<rate>` or `ulaw_8000`); start the stream with the `codec=` and `rate=`
+  that match its **input** format (`codec=pcmu rate=8000` for `ulaw_8000`, `codec=l16 rate=16000`
+  for `pcm_16000`), or the log will say the agent cannot understand the caller.
+- **`gemini`** — Gemini Live (`setup`, then `realtimeInput.audio` at 16 kHz once the server sends
+  `setupComplete`; `serverContent` at 24 kHz back; resampled). The default model is
+  `models/gemini-3.8-live`; name your own in `EARSHOT_SESSION_CONFIG`.
 - **`pipecat`** — Pipecat protobuf `Frame{ audio: AudioRawFrame }` (binary L16).
 - **`assemblyai`** — AssemblyAI Universal-Streaming **STT** (`wss://streaming.assemblyai.com/v3/ws?sample_rate=…`).
   Transcription only: PCM16 audio out (`codec=l16`, coalesced to ≥50 ms chunks), `transcript` JSON in →

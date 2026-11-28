@@ -56,10 +56,13 @@ switch_size_t switch_b64_encode_real(const unsigned char *in, switch_size_t il, 
     out[o] = 0; return o;
 }
 
-int es_ws_send_text(es_ws_t *w, const char *d, size_t l) { (void) w;(void) d;(void) l; return 0; }
-int es_ws_send_binary(es_ws_t *w, const void *d, size_t l) { (void) w;(void) d;(void) l; return 0; }
+/* What the adapter sends is handed to the test when it asks for it, and dropped otherwise. */
+void (*stub_on_send_text)(const char *d, size_t l);
+void (*stub_on_send_binary)(const void *d, size_t l);
+int es_ws_send_text(es_ws_t *w, const char *d, size_t l) { (void) w; if (stub_on_send_text) stub_on_send_text(d, l); return 0; }
+int es_ws_send_binary(es_ws_t *w, const void *d, size_t l) { (void) w; if (stub_on_send_binary) stub_on_send_binary(d, l); return 0; }
 
-/* --- minimal cJSON (flat object, string values; sufficient for command JSON) --- */
+/* --- minimal cJSON (objects, nested objects, scalars; arrays are kept as text) --- */
 static const char *skipws(const char *s) { while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++; return s; }
 static char *parse_string(const char **sp)
 {
@@ -75,23 +78,41 @@ static char *parse_string(const char **sp)
     if (*s == '"') s++;
     out[len] = 0; *sp = s; return out;
 }
-cJSON *cJSON_Parse(const char *value)
+static cJSON *parse_object(const char **sp)
 {
-    const char *s = skipws(value); cJSON *root, *tail = 0;
+    const char *s = skipws(*sp); cJSON *root, *tail = 0;
     if (*s != '{') return 0;
     s++; root = calloc(1, sizeof *root); s = skipws(s);
     while (*s && *s != '}') {
-        char *key, *val = 0; cJSON *it;
+        char *key; cJSON *it;
         s = skipws(s); key = parse_string(&s); if (!key) break;
         s = skipws(s); if (*s == ':') s++; s = skipws(s);
-        if (*s == '"') val = parse_string(&s);
-        else { const char *b = s; size_t n; while (*s && *s != ',' && *s != '}') s++; n = s - b; val = malloc(n + 1); memcpy(val, b, n); val[n] = 0; }
-        it = calloc(1, sizeof *it); it->string = key; it->valuestring = val;
+        if (*s == '{') {                               /* a nested object: its members are the children */
+            it = parse_object(&s);
+            if (!it) { free(key); break; }
+        } else {
+            it = calloc(1, sizeof *it);
+            if (*s == '"') it->valuestring = parse_string(&s);
+            else {                                     /* number, true/false/null, or an array kept as text */
+                const char *b = s; size_t n; int depth = 0;
+                while (*s && (depth || (*s != ',' && *s != '}'))) {
+                    if (*s == '[' || *s == '{') depth++;
+                    else if (*s == ']' || *s == '}') depth--;
+                    s++;
+                }
+                n = s - b; it->valuestring = malloc(n + 1); memcpy(it->valuestring, b, n); it->valuestring[n] = 0;
+                it->valueint = atoi(it->valuestring);
+            }
+        }
+        it->string = key;
         if (tail) tail->next = it; else root->child = it; tail = it;
         s = skipws(s); if (*s == ',') s++; s = skipws(s);
     }
+    if (*s == '}') s++;
+    *sp = s;
     return root;
 }
+cJSON *cJSON_Parse(const char *value) { return parse_object(&value); }
 cJSON *cJSON_GetObjectItem(const cJSON *obj, const char *key)
 {
     cJSON *c;
