@@ -1,0 +1,43 @@
+<include>
+  <context name="mrf">
+    <!-- The called side of a test call: answer and wait. The test drives it over the event socket.
+         send_silence_when_idle makes the parked leg send audio frames, as a leg in a real
+         call does; the agent's audio replaces those frames. -->
+    <extension name="park">
+      <condition field="destination_number" expression="^park$">
+        <action application="answer"/>
+        <action application="set" data="send_silence_when_idle=-1"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <!-- Where an agent's `transfer` command is expected to land. -->
+    <extension name="landed">
+      <condition field="destination_number" expression="^landed$">
+        <action application="set" data="earshot_test_landed=true"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <!-- The stream started from the dialplan (the app), not the API. -->
+    <extension name="app">
+      <condition field="destination_number" expression="^app$">
+        <action application="answer"/>
+        <action application="set" data="send_silence_when_idle=-1"/>
+        <action application="earshot" data="start ws://127.0.0.1:9100/app commands=true"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+
+    <!-- An agent that cannot be reached: give up after two attempts, then fall back. -->
+    <extension name="fallback">
+      <condition field="destination_number" expression="^fallback$">
+        <action application="answer"/>
+        <action application="earshot" data="start ws://127.0.0.1:9199/nobody reconnect_max=2"/>
+        <action application="sleep" data="6000"/>
+        <action application="set" data="earshot_test_fallback=${earshot_failed}"/>
+        <action application="park"/>
+      </condition>
+    </extension>
+  </context>
+</include>

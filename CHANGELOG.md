@@ -6,6 +6,10 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 ## [Unreleased]
 
 ### Added
+- **A live test rig**: `test/live/run.sh` runs real calls through the module on a real
+  FreeSWITCH in one container (no carrier, no keys): audio both ways, the events, every
+  command refusal, reconnect, timeouts, the Twilio dialect, and commands racing a stop or a
+  hangup, with an AddressSanitizer mode. See `test/live/README.md`.
 - **The connection timers are settable per stream.** `connect_timeout=<seconds>` (how long one
   connection attempt may take, default 20, 1 to 120), `liveness=<seconds>|off` (how long a
   connected agent may send nothing, not even a pong, before it is dropped; default 20) and
@@ -50,7 +54,14 @@ All notable changes to Earshot (`mod_earshot`). Format follows
   just before the stop, such as the Twilio dialect's `stop`, was never sent. What is queued is
   now sent first, then a Close frame with status 1000. This is bounded at 150 ms, so an agent
   that has stopped reading cannot delay a hangup or a transfer; a healthy agent takes a few
-  milliseconds.
+  milliseconds. It holds when the agent is talking at that moment, the usual case when a
+  caller hangs up in mid-sentence.
+- **An agent's `record` to a relative path goes to FreeSWITCH's recordings directory.**
+  FreeSWITCH resolves a relative record path against the channel's `sound_prefix`, the
+  directory its prompts are played from, so `record` with `file: "x.wav"` wrote among the
+  prompts (where an agent could overwrite one) and a later `stop` by the same name failed.
+  The module now writes it under the recordings directory, on start and on stop. **If you
+  collected agent recordings from the prompts directory, look in `recordings/` instead.**
 - **Commands that arrive while a stream is closing can no longer crash FreeSWITCH.** `flush`,
   `status`, `metrics` and `send` from the event socket, and a caller's DTMF digit, could run on
   one thread while another thread tore the same stream down, and use its playback buffer or

@@ -1,0 +1,15 @@
+<configuration name="modules.conf" description="Modules">
+  <!-- Only what a call needs. mod_earshot is loaded by the test run, after it is built. -->
+  <modules>
+    <load module="mod_console"/>
+    <load module="mod_logfile"/>
+    <load module="mod_event_socket"/>
+    <load module="mod_sofia"/>
+    <load module="mod_commands"/>
+    <load module="mod_dptools"/>
+    <load module="mod_dialplan_xml"/>
+    <load module="mod_sndfile"/>
+    <load module="mod_native_file"/>
+    <load module="mod_tone_stream"/>
+  </modules>
+</configuration>
