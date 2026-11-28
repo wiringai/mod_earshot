@@ -18,7 +18,7 @@ jobs:
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libwebsockets-dev
       - name: Configure & build tests
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target test_codec test_pb test_cmdguard test_util test_command_dispatch test_proto_audio test_ws_idle test_ws_reconnect --parallel
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target test_codec test_pb test_cmdguard test_util test_command_dispatch test_proto_audio test_ws_idle test_ws_reconnect test_ws_timeouts --parallel
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
 

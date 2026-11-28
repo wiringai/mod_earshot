@@ -229,6 +229,8 @@ start ... metrics=10          # emit earshot::metrics every 10s
 
 ```
 EARSHOT_NO_RECONNECT=true     # channel var to disable auto-reconnect (backpressure is automatic drop-oldest)
+connect_timeout=45            # start option (or EARSHOT_CONNECT_TIMEOUT): give a slow-starting agent 45 s per attempt (default 20)
+liveness=60 ping=10           # start options (or EARSHOT_LIVENESS / EARSHOT_PING): drop a silent agent after 60 s (default 20; liveness=off disables)
 ```
 
 ## 11. Correlation-first  ✓

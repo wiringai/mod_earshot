@@ -83,6 +83,15 @@ if(EARSHOT_TESTS)
     target_link_directories(test_ws_reconnect PRIVATE ${LWS_TEST_LIBRARY_DIRS})
     target_link_libraries(test_ws_reconnect PRIVATE ${LWS_TEST_LIBRARIES} Threads::Threads)
     add_test(NAME ws_reconnect COMMAND test_ws_reconnect)
+
+    # Connect timeout, liveness window and their defaults, against a far end that never
+    # answers or goes silent after the handshake. Takes about 45 s: one case waits past
+    # libwebsockets' own 20-second limit on purpose.
+    add_executable(test_ws_timeouts test/test_ws_timeouts.c src/es_ws.c)
+    target_include_directories(test_ws_timeouts PRIVATE ${LWS_TEST_INCLUDE_DIRS})
+    target_link_directories(test_ws_timeouts PRIVATE ${LWS_TEST_LIBRARY_DIRS})
+    target_link_libraries(test_ws_timeouts PRIVATE ${LWS_TEST_LIBRARIES} Threads::Threads)
+    add_test(NAME ws_timeouts COMMAND test_ws_timeouts)
   endif()
 endif()
 

@@ -33,9 +33,7 @@
 #define ES_HANDSHAKE_BUF (ES_URL_MAX + 8192)   /* URL + every header we add, with room to spare */
 #define ES_STABLE_MS  5000   /* a connection must stay up this long before backoff resets,
                               * so a flapping (accept-then-close) endpoint keeps backing off */
-#define ES_PING_MS    5000   /* send a WebSocket ping this often while connected */
-#define ES_LIVENESS_MS 20000 /* no inbound frame or pong for this long => peer is dead
-                              * (hung agent / half-open TCP): drop the wsi and reconnect */
+/* Ping interval, liveness window and connect timeout are per stream (es_ws_opts_t). */
 
 static long es_now_ms(void)
 {
@@ -88,6 +86,11 @@ struct es_ws {
     long                    last_ping_ms;
     long                    last_rx_ms;    /* last inbound frame/pong; drives liveness timeout */
     int                     want_ping;
+    long                    connect_started_ms;   /* when the attempt in progress began (0 if none) */
+    int                     connect_timed_out;    /* the attempt was abandoned by us (service thread) */
+    int                     connect_timeout_ms;   /* resolved from the options at create */
+    int                     liveness_ms;          /* 0 = check off */
+    int                     ping_ms;
     /* inbound reassembly (service thread only) */
     unsigned char          *rx;
     size_t                  rx_len, rx_cap;
@@ -288,6 +291,7 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
 
     case LWS_CALLBACK_CLIENT_ESTABLISHED:
         if (!w) break;
+        w->connect_started_ms = 0;             /* the attempt is over: it succeeded */
         w->connected_since_ms = es_now_ms();   /* backoff resets only once this proves stable */
         w->last_rx_ms = w->connected_since_ms; /* liveness clock starts now */
         w->last_ping_ms = 0;
@@ -411,11 +415,14 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
             es_ws_msg_t *tail; size_t bytes;
             es_queue_discard(w, es_queue_take(w, &tail, &bytes));
         }
+        w->connect_started_ms = 0;
         if (!w->suppress_events && w->o.on_event) {
             int code = (reason == LWS_CALLBACK_CLIENT_CONNECTION_ERROR) ? -1 : 0;
+            if (w->connect_timed_out) { code = -1; in = (void *) "connect timeout"; }
             w->o.on_event(w->o.user, 0, code,
                           in ? (const char *) in : (code < 0 ? "connect error" : "closed"));
         }
+        w->connect_timed_out = 0;
         break;
 
     case LWS_CALLBACK_WSI_DESTROY:
@@ -423,7 +430,14 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
          * WSI_DESTROY, not CLOSED/CONNECTION_ERROR. Null our wsi here too so es_pool_service
          * can finalize teardown instead of stalling until es_ws_destroy times out. Match on
          * the exact wsi so a newer reconnect's wsi is never cleared. */
-        if (w && w->wsi == wsi) { w->connected = 0; w->wsi = NULL; }
+        if (w && w->wsi == wsi) {
+            w->connected = 0; w->wsi = NULL; w->connect_started_ms = 0;
+            if (w->connect_timed_out) {          /* nothing else told the owner */
+                w->connect_timed_out = 0;
+                if (!w->suppress_events && w->o.on_event)
+                    w->o.on_event(w->o.user, 0, -1, "connect timeout");
+            }
+        }
         break;
 
     case LWS_CALLBACK_EVENT_WAIT_CANCELLED: {
@@ -481,11 +495,13 @@ static void es_connect(es_ws_t *w)
         if (w->o.insecure)
             i.ssl_connection |= LCCSCF_ALLOW_SELFSIGNED | LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK;
     }
+    w->connect_started_ms = es_now_ms();   /* housekeeping abandons the attempt past connect_timeout_ms */
     if (!lws_client_connect_via_info(&i)) {
         /* Be authoritative: on some immediate-failure paths lws returns NULL without
          * firing CONNECTION_ERROR and without nulling *pwsi. Clear it ourselves so the
          * reconnect guard (!w->wsi) can fire — otherwise the stream never retries. */
         w->wsi = NULL;
+        w->connect_started_ms = 0;
         if (w->o.on_event && !w->suppress_events)
             w->o.on_event(w->o.user, 0, -1, "connect failed");
     }
@@ -580,19 +596,27 @@ static void *es_pool_service(void *arg)
                     w->backoff_ms = 250;
                 if (w->have_queued) lws_callback_on_writable(w->wsi);
                 if (w->last_ping_ms == 0) w->last_ping_ms = now;
-                if (now - w->last_ping_ms >= ES_PING_MS) {
+                if (now - w->last_ping_ms >= w->ping_ms) {
                     w->last_ping_ms = now; w->want_ping = 1;
                     lws_callback_on_writable(w->wsi);
                 }
                 /* Liveness: a live peer answers pings with pongs (and usually sends audio),
-                 * so last_rx_ms stays fresh. If nothing has arrived for ES_LIVENESS_MS the
+                 * so last_rx_ms stays fresh. If nothing has arrived for liveness_ms the
                  * peer is hung or the TCP is half-open — force the wsi closed so the reconnect
                  * path below recovers it. kill closes via WRITEABLE returning -1; it is cleared
                  * before the next connect so the fresh wsi is not killed too. */
-                else if (!w->kill && now - w->last_rx_ms >= ES_LIVENESS_MS) {
+                else if (!w->kill && w->liveness_ms && now - w->last_rx_ms >= w->liveness_ms) {
                     w->kill = 1;
                     lws_callback_on_writable(w->wsi);
                 }
+            } else if (!w->connected && w->wsi && w->connect_started_ms
+                       && now - w->connect_started_ms >= w->connect_timeout_ms) {
+                /* The attempt has taken too long (TCP connect, TLS or an agent that accepted
+                 * the socket and never finished the handshake). Abandon it; the owner hears
+                 * a connect error and, with reconnect on, the branch below tries again. */
+                w->connect_started_ms = 0;
+                w->connect_timed_out = 1;   /* es_cb reports it once, whichever callback ends the wsi */
+                lws_set_timeout(w->wsi, PENDING_TIMEOUT_USER_REASON_BASE, LWS_TO_KILL_ASYNC);
             } else if (!w->connected && !w->wsi && w->o.reconnect && now >= w->next_reconnect_ms) {
                 int jitter = (int) ((w->rng = w->rng * 1103515245u + 12345u) % (unsigned) (w->backoff_ms / 2 + 1));
                 w->kill = 0;   /* a liveness drop set this; clear it so the new wsi survives */
@@ -716,6 +740,11 @@ static int es_pool_init(void)   /* lazy, once */
          * overruns, failing the connect. Size them for the longest URL a stream may use. */
         info.pt_serv_buf_size     = ES_HANDSHAKE_BUF;
         info.max_http_header_data = ES_HANDSHAKE_BUF;
+        /* libwebsockets gives up on a pending connect or handshake after its own
+         * timeout_secs (20 by default). A stream may ask for longer, so the library's
+         * limit is set to the longest a stream can ask for; the per-stream
+         * connect_timeout_ms, enforced in es_pool_service, is the one that decides. */
+        info.timeout_secs = ES_WS_CONNECT_TIMEOUT_MAX_MS / 1000;
         pthread_mutex_init(&p->mu, NULL);
         p->list = NULL;
         p->arm_list = NULL;
@@ -794,6 +823,14 @@ es_ws_t *es_ws_create(const es_ws_opts_t *opts)
     w->o.hdr_extra_value  = es_strdup(opts->hdr_extra_value);
     w->o.subprotocol      = es_strdup(opts->subprotocol);
     w->backoff_ms = 250;
+    w->connect_timeout_ms = opts->connect_timeout_ms > 0 ? opts->connect_timeout_ms : ES_WS_CONNECT_TIMEOUT_DEFAULT_MS;
+    if (w->connect_timeout_ms < ES_WS_CONNECT_TIMEOUT_MIN_MS) w->connect_timeout_ms = ES_WS_CONNECT_TIMEOUT_MIN_MS;
+    if (w->connect_timeout_ms > ES_WS_CONNECT_TIMEOUT_MAX_MS) w->connect_timeout_ms = ES_WS_CONNECT_TIMEOUT_MAX_MS;
+    w->liveness_ms = opts->liveness_ms < 0 ? 0 : opts->liveness_ms > 0 ? opts->liveness_ms : ES_WS_LIVENESS_DEFAULT_MS;
+    if (w->liveness_ms && w->liveness_ms < ES_WS_LIVENESS_MIN_MS) w->liveness_ms = ES_WS_LIVENESS_MIN_MS;
+    w->ping_ms = opts->ping_ms > 0 ? opts->ping_ms : ES_WS_PING_DEFAULT_MS;
+    if (w->ping_ms < ES_WS_PING_MIN_MS) w->ping_ms = ES_WS_PING_MIN_MS;
+    if (w->liveness_ms && w->ping_ms > w->liveness_ms / 2) w->ping_ms = w->liveness_ms / 2;
     w->max_queue_bytes = opts->max_queue_bytes > 0 ? (size_t) opts->max_queue_bytes : 262144;
     w->rng = (unsigned) ((size_t) w ^ (size_t) opts->url);
 

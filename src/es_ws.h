@@ -61,7 +61,31 @@ typedef struct {
      * client TLS material at context (not per-wsi) level. Distinct per-stream certs would
      * still require partitioning streams onto their own context (a future item). */
     int                insecure;     /* skip cert/hostname checks (dev only) */
+    /* Timers, in milliseconds. 0 keeps the default; out-of-range values are clamped.
+     *   connect_timeout_ms  how long one connection attempt may take, from the TCP connect to
+     *                       the end of the WebSocket handshake, before it is abandoned (and,
+     *                       with reconnect, retried). Default 20000, range 1000..120000. An
+     *                       agent behind a cold-starting platform can hold the handshake open
+     *                       for tens of seconds; abandoning it early only starts a second
+     *                       session next to the first.
+     *   liveness_ms         a connected peer that sends nothing (no frame, no pong) for this
+     *                       long is taken for dead and dropped. Default 20000, minimum 2000;
+     *                       negative switches the check off.
+     *   ping_ms             how often a ping is sent while connected. Default 5000, minimum
+     *                       1000, and never more than half of liveness_ms: liveness is only
+     *                       meaningful if pings are sent well inside it. */
+    int                connect_timeout_ms;
+    int                liveness_ms;
+    int                ping_ms;
 } es_ws_opts_t;
+
+#define ES_WS_CONNECT_TIMEOUT_DEFAULT_MS 20000
+#define ES_WS_CONNECT_TIMEOUT_MIN_MS      1000
+#define ES_WS_CONNECT_TIMEOUT_MAX_MS    120000
+#define ES_WS_LIVENESS_DEFAULT_MS        20000
+#define ES_WS_LIVENESS_MIN_MS             2000
+#define ES_WS_PING_DEFAULT_MS             5000
+#define ES_WS_PING_MIN_MS                 1000
 
 /* transport counters for metrics (all monotonically increasing) */
 typedef struct {

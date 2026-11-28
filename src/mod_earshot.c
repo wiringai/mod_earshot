@@ -65,6 +65,7 @@
     "\t\t[barge_min_ms=<n>] [barge_fade_ms=<n>]\n" \
     "\t\t[dtmf=on] [mask=on] [commands=true|<action,...>] [setvars=<name,...>] [metrics=<seconds>] [corr=auto|<id>]\n" \
     "\t\t[auth=<token> | EARSHOT_AUTH var] [greeting=<file> | EARSHOT_GREETING var]  (caller context: EARSHOT_META header)\n" \
+    "\t\t[connect_timeout=<seconds>] [liveness=<seconds>|off] [ping=<seconds>]  (defaults 20, 20, 5)\n" \
     "\t  control channel: agent sends {\"type\":\"command\",\"action\":...}; commands=true grants all actions,\n" \
     "\t  commands=play,hangup grants only those. Arguments are validated (app-exec/path/exec-var rejected).\n" \
     "\t  setvar is fail-closed: only variable names listed in setvars=<name,...> may be set.\n" \
@@ -178,6 +179,11 @@ typedef struct es_stream {
 
     /* welcome greeting: a file preloaded at channel rate, dropped into the playout the moment
      * the ready-gate opens so it leads the agent's first words (see the ready-announce block) */
+    /* transport timers, in milliseconds as es_ws_opts_t takes them (0 = default, <0 = off) */
+    int              connect_timeout_ms;    /* connect_timeout= / EARSHOT_CONNECT_TIMEOUT */
+    int              liveness_ms;           /* liveness=       / EARSHOT_LIVENESS */
+    int              ping_ms;               /* ping=           / EARSHOT_PING */
+
     char             greeting_path[256];    /* greeting audio file (greeting= / EARSHOT_GREETING) */
     int16_t         *greeting_pcm;          /* preloaded greeting, L16 mono @ chan_rate (pool-owned) */
     size_t           greeting_samples;      /* samples in greeting_pcm (0 = no greeting) */
@@ -407,6 +413,23 @@ static const char *es_privkey(switch_core_session_t *session, const char *id)
 }
 
 /* Parse one key=value option into the stream config. Returns SWITCH_TRUE if consumed. */
+/* A timer option in seconds ("30", "2.5") as the milliseconds es_ws_opts_t takes; "off",
+ * "false", "no" or "0" switch the timer off (-1) where it can be (liveness only: the
+ * transport falls back to its default for the others); anything unreadable keeps the
+ * default (0). Capped so the multiplication cannot overflow. */
+static int es_timer_ms(const char *val)
+{
+    double secs;
+    char *end = NULL;
+    if (zstr(val)) return 0;
+    if (!strcasecmp(val, "off") || !strcasecmp(val, "false") || !strcasecmp(val, "no")) return -1;
+    secs = strtod(val, &end);
+    if (end == val || secs < 0) return 0;
+    if (secs == 0) return -1;
+    if (secs > 86400) secs = 86400;
+    return (int) (secs * 1000.0 + 0.5);
+}
+
 static switch_bool_t es_apply_option(es_stream_t *st, const char *kv)
 {
     char key[64];
@@ -479,6 +502,12 @@ static switch_bool_t es_apply_option(es_stream_t *st, const char *kv)
         switch_copy_string(st->corr, val, sizeof st->corr);
     } else if (!strcasecmp(key, "auth")) {
         switch_copy_string(st->auth, val, sizeof st->auth);
+    } else if (!strcasecmp(key, "connect_timeout")) {
+        st->connect_timeout_ms = es_timer_ms(val);
+    } else if (!strcasecmp(key, "liveness")) {
+        st->liveness_ms = es_timer_ms(val);
+    } else if (!strcasecmp(key, "ping")) {
+        st->ping_ms = es_timer_ms(val);
     } else if (!strcasecmp(key, "greeting")) {
         switch_copy_string(st->greeting_path, val, sizeof st->greeting_path);  /* path w/o spaces; else EARSHOT_GREETING */
     } else {
@@ -1253,6 +1282,13 @@ static switch_status_t es_start_stream(switch_core_session_t *session, int argc,
         o.url              = st->url;
         o.auth             = st->auth[0] ? st->auth : NULL;
         o.reconnect        = switch_true(switch_channel_get_variable(channel, "EARSHOT_NO_RECONNECT")) ? 0 : 1;
+        /* Timers: the start option wins, else the channel variable, else the default. */
+        o.connect_timeout_ms = st->connect_timeout_ms ? st->connect_timeout_ms
+                             : es_timer_ms(switch_channel_get_variable(channel, "EARSHOT_CONNECT_TIMEOUT"));
+        o.liveness_ms        = st->liveness_ms ? st->liveness_ms
+                             : es_timer_ms(switch_channel_get_variable(channel, "EARSHOT_LIVENESS"));
+        o.ping_ms            = st->ping_ms ? st->ping_ms
+                             : es_timer_ms(switch_channel_get_variable(channel, "EARSHOT_PING"));
         o.user             = st;
         o.on_event         = es_on_ws_event;
         o.on_binary        = es_on_ws_binary;

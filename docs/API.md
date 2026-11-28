@@ -176,6 +176,9 @@ stream.
 | `EARSHOT_META` | opaque caller context → `X-Earshot-Meta` handshake header (see [Caller context](#caller-context)) |
 | `EARSHOT_GREETING` | welcome-audio file path (alternative to `greeting=` for paths with spaces) |
 | `EARSHOT_NO_RECONNECT` | disable auto-reconnect (default: reconnect with jittered backoff) |
+| `EARSHOT_CONNECT_TIMEOUT` | seconds one connection attempt may take before it is abandoned (default 20, range 1 to 120); the `connect_timeout=` start option wins |
+| `EARSHOT_LIVENESS` | seconds a connected agent may send nothing, not even a pong, before it is dropped (default 20, minimum 2; `off` disables); the `liveness=` start option wins |
+| `EARSHOT_PING` | seconds between WebSocket pings (default 5, minimum 1, at most half of the liveness window); the `ping=` start option wins |
 | `EARSHOT_TLS_NO_HOSTNAME_CHECK` | skip wss cert/hostname checks (dev only) |
 | `earshot_ready` / `earshot_talking` / `earshot_masking` | **set by** Earshot for dialplan logic |
 

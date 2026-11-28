@@ -5,6 +5,18 @@ All notable changes to Earshot (`mod_earshot`). Format follows
 
 ## [Unreleased]
 
+### Added
+- **The connection timers are settable per stream.** `connect_timeout=<seconds>` (how long one
+  connection attempt may take, default 20, 1 to 120), `liveness=<seconds>|off` (how long a
+  connected agent may send nothing, not even a pong, before it is dropped; default 20) and
+  `ping=<seconds>` (default 5), as `start` options or the `EARSHOT_CONNECT_TIMEOUT`,
+  `EARSHOT_LIVENESS` and `EARSHOT_PING` channel variables. The defaults are what they were.
+  The connect timeout used to be libwebsockets' own, fixed at 20 seconds: an agent on a
+  platform that holds the handshake open while it starts (a cold serverless instance) was
+  abandoned at 20 seconds and reconnected to, which left the first session running next to
+  the second. A stream can now wait longer for it, or give up sooner.
+- A connection attempt that is abandoned reports `connect timeout` as its reason, once.
+
 ## [0.4.2] — 2026-11-18
 
 A hardening release. Upgrade if agents you do not fully control can connect, if API keys
