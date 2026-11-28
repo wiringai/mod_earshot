@@ -17,6 +17,23 @@ All notable changes to Earshot (`mod_earshot`). Format follows
   the second. A stream can now wait longer for it, or give up sooner.
 - A connection attempt that is abandoned reports `connect timeout` as its reason, once.
 
+### Fixed
+- **A stream that stops now closes its WebSocket properly.** Stopping used to cut the
+  connection: the agent saw an abnormal close (1006) on every call end, and a message queued
+  just before the stop, such as the Twilio dialect's `stop`, was never sent. What is queued is
+  now sent first, then a Close frame with status 1000. This is bounded at 150 ms, so an agent
+  that has stopped reading cannot delay a hangup or a transfer; a healthy agent takes a few
+  milliseconds.
+- **Commands that arrive while a stream is closing can no longer crash FreeSWITCH.** `flush`,
+  `status`, `metrics` and `send` from the event socket, and a caller's DTMF digit, could run on
+  one thread while another thread tore the same stream down, and use its playback buffer or
+  connection after they were freed (an assertion or a use-after-free, in a window of tens of
+  milliseconds around every stop and hangup). Teardown and every verb now run under one
+  per-stream lock; a verb that loses the race answers `-ERR ... is closing`.
+- A second `stop` for a stream that is already stopping is refused; it used to remove the
+  media bug twice.
+- A `start` that failed after voice-activity detection was set up leaked the detector.
+
 ## [0.4.2] — 2026-11-18
 
 A hardening release. Upgrade if agents you do not fully control can connect, if API keys

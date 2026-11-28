@@ -92,6 +92,14 @@ if(EARSHOT_TESTS)
     target_link_directories(test_ws_timeouts PRIVATE ${LWS_TEST_LIBRARY_DIRS})
     target_link_libraries(test_ws_timeouts PRIVATE ${LWS_TEST_LIBRARIES} Threads::Threads)
     add_test(NAME ws_timeouts COMMAND test_ws_timeouts)
+
+    # A stop ends the connection cleanly (queued message delivered, Close 1000) and
+    # promptly, even against an agent that has stopped reading.
+    add_executable(test_ws_close test/test_ws_close.c src/es_ws.c)
+    target_include_directories(test_ws_close PRIVATE ${LWS_TEST_INCLUDE_DIRS})
+    target_link_directories(test_ws_close PRIVATE ${LWS_TEST_LIBRARY_DIRS})
+    target_link_libraries(test_ws_close PRIVATE ${LWS_TEST_LIBRARIES} Threads::Threads)
+    add_test(NAME ws_close COMMAND test_ws_close)
   endif()
 endif()
 

@@ -169,7 +169,12 @@ typedef struct es_stream {
     es_proto_sink_t  sink;          /* inbound-message sink -> play_buf/flush/marks */
     switch_buffer_t *play_buf;      /* agent audio (decoded L16) awaiting playback */
     switch_mutex_t  *play_mutex;    /* guards play_buf: es_ws thread writes, media thread reads */
-    switch_mutex_t  *cmd_ws_mutex;  /* serializes a command worker's echo (es_ws_send_text) against CLOSE's es_ws_destroy */
+    switch_mutex_t  *cmd_ws_mutex;  /* the stream's life lock: CLOSE holds it while it tears down ws, proto_ctx,
+                                     * vad and play_buf; everything that can run beside CLOSE and touches one
+                                     * of them (API verbs, the DTMF hook, a command worker's echo) takes it and
+                                     * checks `closed` first. Order: cmd_ws_mutex, then play_mutex. */
+    switch_bool_t    closed;        /* teardown has begun; nothing below may be used [cmd_ws_mutex] */
+    switch_bool_t    stopping;      /* a `stop` is removing the media bug [cmd_ws_mutex] */
     struct es_mark  *marks_head, *marks_tail;  /* pending Twilio marks, guarded by play_mutex */
     int              marks_n;                  /* pending marks (play_mutex) */
     uint64_t         play_in, play_out;        /* bytes queued to / consumed from play_buf (play_mutex) */
@@ -330,6 +335,7 @@ static void es_fade_out(switch_buffer_t *buf, int fade_ms, int rate)
  * too, and an agent waiting on one must not wait forever. */
 static void es_play_discard_locked(es_stream_t *st, int fade)
 {
+    if (!st->play_buf) return;             /* read-only fork, or already torn down */
     if (fade) es_fade_out(st->play_buf, st->barge_fade_ms, st->chan_rate);
     else      switch_buffer_zero(st->play_buf);
     st->play_out = st->play_in - switch_buffer_inuse(st->play_buf);
@@ -339,11 +345,13 @@ static void es_play_discard_locked(es_stream_t *st, int fade)
 /* Interrupt the agent: fade or hard-cut the queued playback per barge_fade_ms. */
 static void es_barge_now(es_stream_t *st)
 {
-    if (!st->play_buf) return;
-    switch_mutex_lock(st->play_mutex);
+    int had;
+    if (!st->play_mutex) return;
+    switch_mutex_lock(st->play_mutex);     /* play_buf is looked at under the lock CLOSE destroys it under */
+    had = st->play_buf != NULL;
     es_play_discard_locked(st, st->barge_fade_ms > 0);
     switch_mutex_unlock(st->play_mutex);
-    st->barges++;
+    if (had) st->barges++;
 }
 
 /* Remove a stream from its channel's list (no-op if there is no list or it is not on it). */
@@ -389,6 +397,10 @@ static switch_status_t es_dtmf_hook(switch_core_session_t *session, const switch
     es_stream_t *st = (es_stream_t *) switch_channel_get_private(channel, EARSHOT_BUG_NAME);
     char d[2];
     if (!st || direction != SWITCH_DTMF_RECV) return SWITCH_STATUS_SUCCESS;
+    /* The hook runs on the session thread, CLOSE on whichever thread removed the media
+     * bug: hold the life lock so the stream cannot be torn down under this digit. */
+    switch_mutex_lock(st->cmd_ws_mutex);
+    if (st->closed) { switch_mutex_unlock(st->cmd_ws_mutex); return SWITCH_STATUS_SUCCESS; }
     st->dtmf_count++;
     if (ES_LOAD(st->masking)) {
         es_fire_event(session, EARSHOT_EVENT_DTMF, "masked", "true");   /* audit only, digit redacted */
@@ -401,6 +413,7 @@ static switch_status_t es_dtmf_hook(switch_core_session_t *session, const switch
      * and not while paused (the held agent audio must survive the pause) */
     if (!ES_LOAD(st->masking) && !ES_LOAD(st->paused) && (st->barge == ES_BARGE_DTMF || st->barge == ES_BARGE_ANY))
         es_barge_now(st);
+    switch_mutex_unlock(st->cmd_ws_mutex);
     return SWITCH_STATUS_SUCCESS;
 }
 
@@ -1081,11 +1094,15 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
             es_chan_unlink(switch_core_session_get_channel(s), st);
             es_fire_metrics(s, st);      /* final snapshot while ws stats are still available */
         }
+        /* From here to the end the life lock is held: an API verb, the DTMF hook or a
+         * command worker that got hold of st before the private was cleared either
+         * finished already or finds `closed` set and backs off. st itself is session
+         * memory and outlives all of them. */
+        switch_mutex_lock(st->cmd_ws_mutex);
+        st->closed = SWITCH_TRUE;
         if (st->ws) {
-            es_proto_send_stop(st->proto_ctx, st->ws);         /* best-effort postamble */
-            switch_mutex_lock(st->cmd_ws_mutex);               /* fence out any in-flight command-worker echo */
-            es_ws_destroy(st->ws); st->ws = NULL;              /* joins ws thread first */
-            switch_mutex_unlock(st->cmd_ws_mutex);
+            es_proto_send_stop(st->proto_ctx, st->ws);         /* closing message; the transport delivers it, then closes with 1000 */
+            es_ws_destroy(st->ws); st->ws = NULL;              /* returns once the service thread has let go */
         }
         if (st->proto_ctx) { es_proto_destroy(st->proto_ctx); st->proto_ctx = NULL; }
         if (st->vad) switch_vad_destroy(&st->vad);
@@ -1097,6 +1114,7 @@ static switch_bool_t es_media_bug_cb(switch_media_bug_t *bug, void *user_data, s
             if (st->play_buf) switch_buffer_destroy(&st->play_buf);
             switch_mutex_unlock(st->play_mutex);
         }
+        switch_mutex_unlock(st->cmd_ws_mutex);
         es_live_remove(st);   /* last: until here an unload must wait for this stream */
         break;
     }
@@ -1321,6 +1339,7 @@ static switch_status_t es_start_stream(switch_core_session_t *session, int argc,
             stream->write_function(stream, "-ERR could not open websocket to %s\n", es_url_for_display(st, shown, sizeof shown));
             if (st->ws) { es_ws_destroy(st->ws); st->ws = NULL; }
             es_proto_destroy(st->proto_ctx); st->proto_ctx = NULL;
+            if (st->vad) switch_vad_destroy(&st->vad);
             if (st->play_buf) switch_buffer_destroy(&st->play_buf);
             return SWITCH_STATUS_FALSE;
         }
@@ -1347,6 +1366,7 @@ static switch_status_t es_start_stream(switch_core_session_t *session, int argc,
         stream->write_function(stream, "-ERR could not attach media bug\n");
         es_ws_destroy(st->ws); st->ws = NULL;
         es_proto_destroy(st->proto_ctx); st->proto_ctx = NULL;
+        if (st->vad) switch_vad_destroy(&st->vad);
         if (st->play_buf) switch_buffer_destroy(&st->play_buf);
         return SWITCH_STATUS_FALSE;
     }
@@ -1365,8 +1385,24 @@ static switch_status_t es_simple(switch_core_session_t *session, const char *ver
     es_stream_t *st = (es_stream_t *) switch_channel_get_private(channel, es_privkey(session, id));
     if (!st) { stream->write_function(stream, "-ERR no active earshot stream '%s'\n", id && id[0] ? id : "default"); return SWITCH_STATUS_FALSE; }
 
+    /* A verb can arrive on any thread while another thread is tearing the stream down
+     * (a `stop`, a hangup). The private is cleared first in CLOSE, but this thread may
+     * have read it just before: so every verb runs under the life lock and gives up if
+     * teardown has begun. st is session memory, valid while this thread holds the session. */
+    switch_mutex_lock(st->cmd_ws_mutex);
+    if (st->closed || st->stopping) {
+        switch_mutex_unlock(st->cmd_ws_mutex);
+        stream->write_function(stream, "-ERR earshot stream '%s' is closing\n", id && id[0] ? id : "default");
+        return SWITCH_STATUS_FALSE;
+    }
     if (!strcasecmp(verb, "stop")) {
+        /* Removing the bug runs CLOSE on this thread, which takes the life lock itself;
+         * `stopping` keeps a second `stop` and every other verb out in the meantime. */
+        st->stopping = SWITCH_TRUE;
+        switch_mutex_unlock(st->cmd_ws_mutex);
         switch_core_media_bug_remove(session, &st->bug);   /* triggers CLOSE -> teardown (clears private) */
+        stream->write_function(stream, "+OK %s\n", verb);
+        return SWITCH_STATUS_SUCCESS;
     } else if (!strcasecmp(verb, "pause")) {
         /* freeze both directions: caller audio stops going to the agent and queued agent audio is
          * held (not dropped). This is what mod_audio_stream's `pause` means and what controllers
@@ -1387,6 +1423,7 @@ static switch_status_t es_simple(switch_core_session_t *session, const char *ver
             st->ws ? es_ws_connected(st->ws) : 0, ES_LOAD(st->ready), ES_LOAD(st->paused),
             (unsigned long long) st->rx_frames,
             st->play_buf ? (unsigned) switch_buffer_inuse(st->play_buf) : 0);
+        switch_mutex_unlock(st->cmd_ws_mutex);
         return SWITCH_STATUS_SUCCESS;
     }
     else if (!strcasecmp(verb, "metrics")) {
@@ -1409,9 +1446,11 @@ static switch_status_t es_simple(switch_core_session_t *session, const char *ver
             (unsigned long long) st->first_audio_ms, (unsigned long long) st->resp_ms_last,
             (unsigned long long) st->resp_ms_max, (unsigned long long) st->turns,
             ws.connected, ws.reconnects, (unsigned long long) ws.queue_drops, ws.rtt_ms);
+        switch_mutex_unlock(st->cmd_ws_mutex);
         return SWITCH_STATUS_SUCCESS;
     }
 
+    switch_mutex_unlock(st->cmd_ws_mutex);
     stream->write_function(stream, "+OK %s\n", verb);
     return SWITCH_STATUS_SUCCESS;
 }
@@ -1455,9 +1494,16 @@ static switch_status_t es_send_text_cmd(switch_core_session_t *session, const ch
 {
     switch_channel_t *channel = switch_core_session_get_channel(session);
     es_stream_t *st = (es_stream_t *) switch_channel_get_private(channel, es_privkey(session, id));
-    if (!st || !st->ws) { stream->write_function(stream, "-ERR no active earshot stream\n"); return SWITCH_STATUS_FALSE; }
-    if (zstr(text))     { stream->write_function(stream, "-ERR send needs text\n"); return SWITCH_STATUS_FALSE; }
+    if (!st)        { stream->write_function(stream, "-ERR no active earshot stream\n"); return SWITCH_STATUS_FALSE; }
+    if (zstr(text)) { stream->write_function(stream, "-ERR send needs text\n"); return SWITCH_STATUS_FALSE; }
+    switch_mutex_lock(st->cmd_ws_mutex);               /* see es_simple: the stream may be closing on another thread */
+    if (st->closed || st->stopping || !st->ws) {
+        switch_mutex_unlock(st->cmd_ws_mutex);
+        stream->write_function(stream, "-ERR no active earshot stream\n");
+        return SWITCH_STATUS_FALSE;
+    }
     es_ws_send_text(st->ws, text, strlen(text));
+    switch_mutex_unlock(st->cmd_ws_mutex);
     stream->write_function(stream, "+OK send\n");
     return SWITCH_STATUS_SUCCESS;
 }

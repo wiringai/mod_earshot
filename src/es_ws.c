@@ -34,6 +34,11 @@
 #define ES_STABLE_MS  5000   /* a connection must stay up this long before backoff resets,
                               * so a flapping (accept-then-close) endpoint keeps backing off */
 /* Ping interval, liveness window and connect timeout are per stream (es_ws_opts_t). */
+#define ES_DRAIN_MS   150    /* on stop, how long a connected stream may take to send what is
+                              * still queued (a protocol's closing message), send a Close
+                              * frame and hear the peer's reply, before it is cut off. A
+                              * healthy peer needs a few milliseconds; the bound is for one
+                              * that has stopped reading, so a hangup is never held up by it. */
 
 static long es_now_ms(void)
 {
@@ -73,6 +78,8 @@ struct es_ws {
     _Atomic int             done;         /* service released the wsi + unlinked us (spun on) */
     volatile int            orphaned;     /* owner gave up waiting; service frees    [p->mu] */
     int                     kill;         /* force-close the wsi (service thread only) */
+    int                     draining;     /* stop requested while connected: flush, then Close(1000) (service thread only) */
+    long                    drain_deadline_ms;
     _Atomic int             suppress_events; /* mute owner callbacks once teardown starts */
     int                     ever_connected; /* a connection was established at least once (service thread) */
     int                     backoff_ms;
@@ -367,6 +374,21 @@ static int es_cb(struct lws *wsi, enum lws_callback_reasons reason,
         es_ws_msg_t *m;
         if (!w) break;
         if (w->kill) return -1;                        /* teardown: close now */
+        if (w->draining) {
+            /* A clean end: whatever is still queued goes out first (Twilio's `stop`, a
+             * vendor's closing message), then a Close frame with status 1000, so the
+             * agent sees a normal close and not a dropped connection (1006). */
+            m = es_dequeue(w);
+            if (m) {
+                int n = lws_write(wsi, m->buf + LWS_PRE, m->len, m->binary ? LWS_WRITE_BINARY : LWS_WRITE_TEXT);
+                free(m);
+                if (n < 0) return -1;
+                lws_callback_on_writable(wsi);
+                break;
+            }
+            lws_close_reason(wsi, LWS_CLOSE_STATUS_NORMAL, NULL, 0);
+            return -1;
+        }
         if (w->want_ping) {
             unsigned char pbuf[LWS_PRE + sizeof(long)];
             w->want_ping = 0;
@@ -560,7 +582,13 @@ static void *es_pool_service(void *arg)
             es_ws_t *next = w->lnext;
             if (w->teardown) {
                 if (w->wsi) {
-                    if (!w->kill) {           /* force the connection closed on this thread */
+                    if (!w->kill && w->connected && !w->draining) {
+                        /* connected: end it cleanly (see WRITEABLE), within ES_DRAIN_MS */
+                        w->draining = 1; w->suppress_events = 1;
+                        w->drain_deadline_ms = now + ES_DRAIN_MS;
+                        lws_callback_on_writable(w->wsi);
+                    } else if (!w->kill && (!w->draining || now >= w->drain_deadline_ms)) {
+                        /* still connecting, or the clean end ran out of time: cut it off */
                         w->kill = 1; w->suppress_events = 1;
                         lws_set_timeout(w->wsi, PENDING_TIMEOUT_CLOSE_SEND, LWS_TO_KILL_ASYNC);
                         lws_callback_on_writable(w->wsi);
