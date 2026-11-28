@@ -42,8 +42,8 @@ at it — but the module still treats agent input defensively:
   variables such as `transfer_after_bridge` reach the `inline` dialplan, i.e. RCE, through their *value*), so
   only variable names you list in `setvars=<name,...>` are settable, and none are settable by default. The other
   arguments an agent supplies are allowlisted too. `transfer` may name only the `XML` dialplan unless
-  `dialplans=<name,...>` lists another (`inline` never). `record` takes a relative path, written under
-  FreeSWITCH's recordings directory, or an absolute path under a directory listed in `record_dir=<dir,...>`;
+  `dialplans=<name,...>` lists another (`inline` never). `record` takes a relative path, which the module writes
+  under FreeSWITCH's recordings directory (left to FreeSWITCH it would land among the prompts it plays), or an absolute path under a directory listed in `record_dir=<dir,...>`;
   with none listed, absolute paths are refused. `play` and `record` refuse `http://`, `shout://` and every
   other stream scheme unless `media_schemes=<scheme,...>` lists it (`tone_stream`, `silence_stream` and
   `local_stream` are always allowed for `play`), so an agent cannot make FreeSWITCH fetch a URL of its

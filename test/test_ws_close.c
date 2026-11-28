@@ -6,6 +6,9 @@
  *      last message.
  *   2. An agent that has stopped reading cannot hold the stop up: the stream is cut
  *      off after a short bound, so a hangup or transfer is not delayed by it.
+ *   3. An agent that is talking when the stream stops (the usual case: a caller hangs
+ *      up in mid-sentence) still sees the normal close. Its audio in flight used to
+ *      cut the connection before the Close frame was written.
  *
  * The agent in case 1 is a libwebsockets server in this process that records what it
  * receives and how the connection closed; in case 2 it is a plain socket that answers
@@ -38,11 +41,30 @@ static char        got[8][64];
 static int         got_n;
 static _Atomic int close_code = -1;     /* status the client closed with (-1: none seen) */
 static _Atomic int closed;
+static _Atomic int talk;                /* case 3: the server sends audio without pause */
 
 static int srv_cb(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len)
 {
     (void) wsi; (void) user;
     switch (reason) {
+    /* Case 3: a frame of audio every 2 ms, ten times a real agent's rate. Paced on a
+     * timer and not sent as fast as the socket takes it: a server with a write still
+     * pending when the Close arrives drops the connection without reporting the status
+     * (libwebsockets does, "closing on peer close due to pending tx"), which would be
+     * this test's server failing, not the stream. */
+    case LWS_CALLBACK_ESTABLISHED:
+        if (talk) lws_set_timer_usecs(wsi, 2000);
+        break;
+    case LWS_CALLBACK_TIMER:
+        if (talk) { lws_callback_on_writable(wsi); lws_set_timer_usecs(wsi, 2000); }
+        break;
+    case LWS_CALLBACK_SERVER_WRITEABLE:
+        if (talk) {
+            unsigned char frame[LWS_PRE + 160];
+            memset(frame + LWS_PRE, 0x7f, 160);
+            if (lws_write(wsi, frame + LWS_PRE, 160, LWS_WRITE_BINARY) < 0) return -1;
+        }
+        break;
     case LWS_CALLBACK_RECEIVE:
         pthread_mutex_lock(&mu);
         if (got_n < 8) snprintf(got[got_n++], sizeof got[0], "%.*s", (int) len, (const char *) in);
@@ -195,6 +217,32 @@ int main(void)
     CHECK(took < 700, "stopping took %ld ms against an agent that never answers", took);
     printf("    stopped in %ld ms\n", took);
     deaf_stop(&deaf);
+
+    printf("3. an agent that is talking when the stream stops still sees a normal close\n");
+    server_start(&srv, port + 2);
+    talk = 1;
+    {
+        int missed = 0;
+        for (round = 0; round < 20; round++) {
+            close_code = -1; closed = 0;
+            w = open_stream(port + 2);
+            usleep(20000 + (round % 5) * 7000);
+            t0 = now_ms(); es_ws_stop(w); es_ws_destroy(w); took = now_ms() - t0;
+            until = now_ms() + 2000;
+            while (now_ms() < until && !closed) usleep(5000);
+            if (close_code != 1000) missed++;
+            CHECK(took < 400, "round %d: stopping took %ld ms with a talking agent", round, took);
+        }
+        /* One miss in twenty is allowed: about once in a thousand rounds this test's own
+         * server ends the connection without reporting the status it was given. The live
+         * rig (test/live), whose agent is a different WebSocket implementation, saw 2000
+         * normal closes in 2000 such stops. Before the fix a third or more of the rounds
+         * missed, so the bound still catches the defect. */
+        CHECK(missed <= 1, "%d of 20 stops with a talking agent were not seen as a normal close", missed);
+        printf("    %d of 20 closed with status 1000\n", 20 - missed);
+    }
+    talk = 0;
+    server_stop(&srv);
 
     es_ws_global_shutdown();
     printf(fails ? "\nFAILED: %d check(s)\n" : "\nok\n", fails);

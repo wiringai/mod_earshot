@@ -29,6 +29,7 @@ struct es_proto_ctx {
     const char     *setvar_allow; /* commands setvar: operator allowlist of settable var names (setvars=); NULL=none */
     const char     *dialplan_allow;  /* dialplans=: transfer dialplans beyond XML; NULL=none */
     const char     *record_dirs;     /* record_dir=: directories an absolute record path may lie under; NULL=none */
+    const char     *record_base;     /* where a relative record path is written; NULL = left to FreeSWITCH */
     const char     *media_schemes;   /* media_schemes=: stream schemes play/record may use; NULL=built-ins only */
     uint64_t        out_seq;    /* Twilio sequenceNumber */
     uint64_t        out_chunk;  /* Twilio media chunk */
@@ -180,6 +181,14 @@ void es_proto_set_cmd_policy(es_proto_ctx_t *p, const char *dialplans_csv,
 {
     if (!p) return;
     p->dialplan_allow = dialplans_csv; p->record_dirs = record_dirs_csv; p->media_schemes = media_schemes_csv;
+}
+
+/* The directory a relative record path is written under. FreeSWITCH itself would resolve
+ * it against the channel's sound_prefix, the directory its prompts are played from, where
+ * an agent could overwrite a prompt; the module names its recordings directory instead. */
+void es_proto_set_record_base(es_proto_ctx_t *p, const char *dir)
+{
+    if (p) p->record_base = (dir && *dir) ? dir : NULL;
 }
 
 void es_proto_destroy(es_proto_ctx_t *p)
@@ -552,7 +561,14 @@ static void es_dispatch_command(es_proto_ctx_t *p, cJSON *root, const es_proto_s
         if (!es_cmd_record_ok(p->record_dirs, p->media_schemes, file))
             ES_CMD_BLOCK("rejected: record path (absolute path outside record_dir=, or a stream scheme not in media_schemes=)");
         snprintf(api, sizeof api, "uuid_record");
-        snprintf(arg, sizeof arg, "%s %s %s", uuid, *state ? state : "start", file);
+        /* A relative path is written under the recordings directory, on start and on stop
+         * alike (FreeSWITCH matches a stop against the full path). "all" is uuid_record's
+         * own word for every recording on the channel, not a file. */
+        if (p->record_base && file[0] != '/' && !strstr(file, "://") &&
+            !(!strcasecmp(state, "stop") && !strcasecmp(file, "all")))
+            snprintf(arg, sizeof arg, "%s %s %s/%s", uuid, *state ? state : "start", p->record_base, file);
+        else
+            snprintf(arg, sizeof arg, "%s %s %s", uuid, *state ? state : "start", file);
     } else if (!strcasecmp(action, "setvar")) {
         const char *name  = es_json_str(root, "name");
         const char *value = es_json_str(root, "value");

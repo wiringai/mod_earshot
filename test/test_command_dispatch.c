@@ -75,6 +75,13 @@ int main(void)
     LEGIT("{\"type\":\"command\",\"action\":\"transfer\",\"to\":\"1000\",\"dialplan\":\"XML\",\"context\":\"default\"}", "uuid_transfer", "UUID-1 1000 XML default");
     LEGIT("{\"type\":\"command\",\"action\":\"play\",\"file\":\"tone_stream://%(200,0,440)\"}",   "uuid_broadcast", "UUID-1 tone_stream://%(200,0,440) aleg");
     LEGIT("{\"type\":\"command\",\"action\":\"record\",\"file\":\"call-123.wav\"}",               "uuid_record",    "UUID-1 start call-123.wav");
+    /* with a recordings directory named, a relative path is written under it, and stopped by the same name */
+    es_proto_set_record_base(P, "/var/lib/freeswitch/recordings");
+    LEGIT("{\"type\":\"command\",\"action\":\"record\",\"file\":\"call-123.wav\"}",               "uuid_record",    "UUID-1 start /var/lib/freeswitch/recordings/call-123.wav");
+    LEGIT("{\"type\":\"command\",\"action\":\"record\",\"state\":\"stop\",\"file\":\"call-123.wav\"}", "uuid_record", "UUID-1 stop /var/lib/freeswitch/recordings/call-123.wav");
+    LEGIT("{\"type\":\"command\",\"action\":\"record\",\"state\":\"stop\",\"file\":\"all\"}",        "uuid_record",    "UUID-1 stop all");
+    LEGIT("{\"type\":\"command\",\"action\":\"record\",\"file\":\"/var/rec/call.wav\"}",            "uuid_record",    "UUID-1 start /var/rec/call.wav");
+    es_proto_set_record_base(P, NULL);
 
     printf("\n== ATTACK payloads (must ALL be blocked) ==\n");
     /* allowlists: what the operator did not name is refused, however harmless it looks */

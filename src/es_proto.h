@@ -113,6 +113,8 @@ void            es_proto_set_setvar_allow(es_proto_ctx_t *p, const char *csv);
  * use beyond the harmless built-ins (`media_schemes=`). See es_cmdguard.h. */
 void            es_proto_set_cmd_policy(es_proto_ctx_t *p, const char *dialplans_csv,
                                         const char *record_dirs_csv, const char *media_schemes_csv);
+/* Directory a relative `record` path is written under (borrowed; must outlive the ctx). */
+void            es_proto_set_record_base(es_proto_ctx_t *p, const char *dir);
 
 /* Lifecycle preamble/postamble (Twilio connected+start / stop; no-op for native). */
 void es_proto_send_start(es_proto_ctx_t *p, es_ws_t *ws);

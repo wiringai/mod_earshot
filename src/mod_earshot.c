@@ -1319,6 +1319,7 @@ static switch_status_t es_start_stream(switch_core_session_t *session, int argc,
                                         switch_channel_get_variable(channel, "EARSHOT_SESSION_CONFIG"));
         es_proto_set_setvar_allow(st->proto_ctx, st->setvar_allow);  /* borrowed; st outlives the ctx */
         es_proto_set_cmd_policy(st->proto_ctx, st->dialplan_allow, st->record_dirs, st->media_schemes);
+        es_proto_set_record_base(st->proto_ctx, SWITCH_GLOBAL_dirs.recordings_dir);
         es_scrub_credentials(channel);   /* both are copied now (st->auth above, the config just here) */
 
         /* module-side VAD runs on the channel-rate read stream */
